@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { collection, query, where, addDoc, serverTimestamp, onSnapshot, doc } from 'firebase/firestore';
-import { db, Campaign, simulatePixPaymentConfirmation } from '../services/firebaseConfig';
+import { db, Campaign, simulatePixPaymentConfirmation, markOrderAsPaid } from '../services/firebaseConfig';
 import { Ticket as TicketIcon, Sparkles, Search, ShieldCheck, Loader2, Grid, Zap, Calendar, Music, TrendingUp, AlertCircle, CheckCircle2, Share2, MessageCircle, Copy, Check, X, Mail, CreditCard } from 'lucide-react';
 import { formatCurrency, formatPhone, formatTicketNumber, generateRaffleTickets, generatePixCode, calculateProgress, formatCpf, cleanCpf, validateEmail, validateCpf } from '../utils/raffle';
 import TicketGrid from '../components/TicketGrid';
@@ -213,6 +213,60 @@ export default function Home() {
     });
     return () => unsub();
   }, [activeOrderId, toast]);
+
+  // Callback chamado automaticamente assim que o Mercado Pago detectar que o dinheiro caiu na conta
+  const handlePaymentApproved = async (paymentId: string | number) => {
+    if (!activeOrderId) return;
+    try {
+      await markOrderAsPaid(activeOrderId, String(paymentId));
+      setModalPixData((prev) => (prev ? { ...prev, status: 'paid' } : null));
+      toast.success('Pagamento Pix identificado pelo Mercado Pago com sucesso!', 'Pix Aprovado');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Sincronização automática em segundo plano: checa periodicamente pedidos pendentes contra o Mercado Pago
+  useEffect(() => {
+    const checkPendingOrders = async () => {
+      try {
+        const storedOrders = JSON.parse(localStorage.getItem('rifas_gpn_db_orders') || '[]');
+        const pendingWithPaymentId = storedOrders
+          .filter((o: any) => o.status === 'pending' && (o.pix_payment_id || o.paymentId))
+          .map((o: any) => ({
+            orderId: o.id,
+            paymentId: o.pix_payment_id || o.paymentId
+          }));
+
+        if (pendingWithPaymentId.length === 0) return;
+
+        const res = await fetch('/api/check-pending-orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orders: pendingWithPaymentId })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.status === 'success' && Array.isArray(data.approved) && data.approved.length > 0) {
+            for (const approvedItem of data.approved) {
+              await markOrderAsPaid(approvedItem.orderId, approvedItem.paymentId, {
+                method: 'pix',
+                amount: approvedItem.amount
+              });
+              toast.success(`Pagamento do Pedido #${approvedItem.orderId.slice(-6).toUpperCase()} confirmado pelo banco!`, 'Venda Computada');
+            }
+          }
+        }
+      } catch (err) {
+        // silent
+      }
+    };
+
+    checkPendingOrders();
+    const interval = setInterval(checkPendingOrders, 5000);
+    return () => clearInterval(interval);
+  }, [toast]);
 
   const handleModalSimulateSuccess = async () => {
     if (!activeOrderId) return;
@@ -826,6 +880,7 @@ export default function Home() {
         isOpen={isPixModalOpen}
         onClose={() => setIsPixModalOpen(false)}
         pixData={modalPixData}
+        onPaymentApproved={handlePaymentApproved}
         onSimulateSuccess={handleModalSimulateSuccess}
         onViewReceipt={handleModalViewReceipt}
       />

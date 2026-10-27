@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Copy, Check, Clock, X, CheckCircle2, ShieldCheck, Loader2, MessageCircle, AlertCircle, ExternalLink, Zap } from 'lucide-react';
+import { Copy, Check, Clock, X, CheckCircle2, ShieldCheck, Loader2, MessageCircle, AlertCircle, ExternalLink, Zap, Radio } from 'lucide-react';
 import { formatCurrency, formatTicketNumber, formatPhone, formatCpf, generateWhatsAppTicketMessage, generateWhatsAppLink } from '../utils/raffle';
 import { useToast } from './Toast';
+import confetti from 'canvas-confetti';
 
 export interface PixData {
   payment_id?: string | number;
@@ -24,6 +25,7 @@ interface PixPaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
   pixData: PixData | null;
+  onPaymentApproved?: (paymentId: string | number) => void;
   onSimulateSuccess?: () => void;
   onViewReceipt?: () => void;
 }
@@ -32,12 +34,16 @@ export default function PixPaymentModal({
   isOpen,
   onClose,
   pixData,
+  onPaymentApproved,
   onSimulateSuccess,
   onViewReceipt
 }: PixPaymentModalProps) {
   const toast = useToast();
   const [copied, setCopied] = useState<boolean>(false);
   const [timeLeft, setTimeLeft] = useState<number>(15 * 60); // 15 minutos em segundos
+  const [autoOpenedWa, setAutoOpenedWa] = useState<boolean>(false);
+
+  const isPaid = pixData?.status === 'paid' || pixData?.status === 'approved';
 
   // Sincroniza o timer com data de expiração se informada
   useEffect(() => {
@@ -54,7 +60,7 @@ export default function PixPaymentModal({
 
   // Contagem regressiva
   useEffect(() => {
-    if (!isOpen || pixData?.status === 'paid' || pixData?.status === 'approved') return;
+    if (!isOpen || isPaid) return;
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
@@ -67,17 +73,38 @@ export default function PixPaymentModal({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [isOpen, pixData?.status]);
+  }, [isOpen, isPaid]);
 
-  if (!isOpen || !pixData) return null;
+  // Active Real-Time Polling: Verifica diretamente na API do Mercado Pago a cada 2.5s se o Pix caiu no banco
+  useEffect(() => {
+    if (!isOpen || !pixData?.payment_id || isPaid) return;
 
-  const isPaid = pixData.status === 'paid' || pixData.status === 'approved';
-  const minutes = Math.floor(timeLeft / 60);
-  const seconds = timeLeft % 60;
-  const formattedCountdown = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    let isMounted = true;
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/pix-status/${pixData.payment_id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if ((data.is_approved || data.payment_status === 'approved') && isMounted) {
+            clearInterval(pollInterval);
+            if (onPaymentApproved && pixData?.payment_id) {
+              onPaymentApproved(pixData.payment_id);
+            }
+          }
+        }
+      } catch (err) {
+        // silent retry
+      }
+    }, 2500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(pollInterval);
+    };
+  }, [isOpen, pixData?.payment_id, isPaid, onPaymentApproved]);
 
   const handleCopyPix = () => {
-    if (!pixData.pix_copia_e_cola) return;
+    if (!pixData?.pix_copia_e_cola) return;
 
     const fallbackCopy = (text: string) => {
       try {
@@ -111,22 +138,45 @@ export default function PixPaymentModal({
     }
   };
 
-  const rawNumbers = pixData.numeros_selecionados || [];
+  const rawNumbers = pixData?.numeros_selecionados || [];
   const numbersList = rawNumbers.map((n) => typeof n === 'number' ? formatTicketNumber(n) : String(n));
 
   // WhatsApp Message
-  const waMessage = generateWhatsAppTicketMessage({
+  const waMessage = pixData ? generateWhatsAppTicketMessage({
     buyerName: pixData.comprador_nome || 'Participante',
     buyerPhone: pixData.comprador_telefone,
     orderId: pixData.payment_id ? String(pixData.payment_id) : undefined,
     selectedNumbers: rawNumbers.map(n => Number(n)).filter(n => !isNaN(n)),
     totalAmount: pixData.valor,
     totalTickets: 300
-  });
+  }) : '';
 
-  const waLink = pixData.comprador_telefone 
+  const waLink = pixData?.comprador_telefone 
     ? generateWhatsAppLink(pixData.comprador_telefone, waMessage)
     : '#';
+
+  // Disparo automático do WhatsApp ao cair o pagamento no banco
+  useEffect(() => {
+    if (isPaid && !autoOpenedWa && pixData?.comprador_telefone) {
+      setAutoOpenedWa(true);
+      try {
+        confetti({ particleCount: 100, spread: 80, origin: { y: 0.5 } });
+      } catch (e) {}
+
+      // Abre automaticamente o WhatsApp com os números para o comprador armazenar
+      const timer = setTimeout(() => {
+        window.open(waLink, '_blank', 'noopener,noreferrer');
+      }, 700);
+
+      return () => clearTimeout(timer);
+    }
+  }, [isPaid, autoOpenedWa, pixData?.comprador_telefone, waLink]);
+
+  if (!isOpen || !pixData) return null;
+
+  const minutes = Math.floor(timeLeft / 60);
+  const seconds = timeLeft % 60;
+  const formattedCountdown = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
@@ -183,26 +233,43 @@ export default function PixPaymentModal({
                 Seus números foram registrados e reservados com sucesso para o sorteio do <strong>Show Completo do Grupo Part Negra</strong>.
               </p>
 
+              {/* Números Confirmados em destaque */}
+              <div className="bg-neutral-950 p-4 rounded-2xl border border-emerald-500/30 text-center space-y-2">
+                <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider block">
+                  Seus Números da Sorte ({numbersList.length}):
+                </span>
+                <div className="flex flex-wrap justify-center gap-1.5 max-h-32 overflow-y-auto">
+                  {numbersList.map(n => (
+                    <span key={n} className="px-3 py-1 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono font-bold text-sm rounded-xl">
+                      {n}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
               {pixData.comprador_telefone && (
                 <div className="pt-2">
                   <a
                     href={waLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-2xl text-xs transition shadow-lg shadow-emerald-500/20"
+                    className="inline-flex items-center justify-center gap-2 px-5 py-3.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-2xl text-xs transition shadow-lg shadow-emerald-500/20 w-full"
                   >
                     <MessageCircle className="w-4 h-4 fill-current" />
                     <span>Salvar Números no WhatsApp</span>
                   </a>
+                  <p className="text-[10px] text-neutral-500 mt-1.5">
+                    WhatsApp aberto automaticamente para armazenar seus bilhetes.
+                  </p>
                 </div>
               )}
 
               {onViewReceipt && (
-                <div>
+                <div className="pt-2">
                   <button
                     type="button"
                     onClick={onViewReceipt}
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold underline underline-offset-4"
+                    className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold underline underline-offset-4 cursor-pointer"
                   >
                     Ver comprovante oficial completo
                   </button>
@@ -211,6 +278,20 @@ export default function PixPaymentModal({
             </div>
           ) : (
             <>
+              {/* Radar de Detecção Automática */}
+              <div className="flex items-center justify-between p-3 bg-neutral-950 border border-emerald-500/30 rounded-2xl text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                  </span>
+                  <span className="text-[11px] font-bold text-emerald-400">
+                    Aguardando confirmação do banco...
+                  </span>
+                </div>
+                <span className="text-[10px] text-neutral-500 font-mono">Baixa em tempo real</span>
+              </div>
+
               {/* Valor Total */}
               <div className="text-center py-1">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-neutral-400">

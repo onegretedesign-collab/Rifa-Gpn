@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { collection, query, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, orderBy } from 'firebase/firestore';
-import { db, Campaign, Order, simulatePixPaymentConfirmation, resetRifasDemoData, resetAllPurchases } from '../services/firebaseConfig';
+import { db, Campaign, Order, simulatePixPaymentConfirmation, resetRifasDemoData, resetAllPurchases, markOrderAsPaid } from '../services/firebaseConfig';
 import { DollarSign, Ticket, Layers, Plus, X, ToggleLeft, ToggleRight, Loader2, ArrowLeft, RefreshCw, CheckCircle, Clock, ExternalLink, Image as ImageIcon, Zap, Trash2, Lock, KeyRound, ShieldCheck, Eye, EyeOff, LogOut, User, AlertCircle, MessageCircle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { formatCurrency, formatTicketNumber, generateWhatsAppTicketMessage, generateWhatsAppLink } from '../utils/raffle';
@@ -125,6 +125,47 @@ export default function AdminDashboard() {
       console.error(err);
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  const [isSyncingMp, setIsSyncingMp] = useState<boolean>(false);
+
+  const handleSyncMercadoPago = async (silent: boolean = false) => {
+    setIsSyncingMp(true);
+    try {
+      const pendings = orders.filter(o => o.status === 'pending' && (o.pix_payment_id || o.paymentId));
+      if (pendings.length === 0) {
+        if (!silent) toast.info('Não há pedidos pendentes aguardando baixa no momento.', 'Tudo Atualizado');
+        return;
+      }
+
+      const checkRes = await fetch('/api/check-pending-orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orders: pendings.map(o => ({
+            orderId: o.id,
+            paymentId: o.pix_payment_id || o.paymentId
+          }))
+        })
+      });
+
+      if (checkRes.ok) {
+        const data = await checkRes.json();
+        if (data.approved && data.approved.length > 0) {
+          for (const app of data.approved) {
+            await markOrderAsPaid(app.orderId, app.paymentId, app);
+          }
+          toast.success(`${data.approved.length} pagamento(s) Pix baixado(s) e confirmados!`, 'Mercado Pago Sincronizado');
+        } else if (!silent) {
+          toast.info('Nenhum novo pagamento Pix compensado até o momento.', 'Mercado Pago');
+        }
+      }
+    } catch (err) {
+      console.error('Error syncing Mercado Pago:', err);
+      if (!silent) toast.error('Erro de conexão ao sincronizar com Mercado Pago.');
+    } finally {
+      setIsSyncingMp(false);
     }
   };
 
@@ -282,6 +323,20 @@ export default function AdminDashboard() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={isSyncingMp}
+            onClick={() => handleSyncMercadoPago(false)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 rounded-xl text-emerald-400 hover:text-emerald-300 text-xs font-bold transition cursor-pointer"
+            title="Sincronizar pagamentos Pix com a API do Mercado Pago"
+          >
+            {isSyncingMp ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+            <span>Sincronizar MP</span>
+          </button>
           <button
             type="button"
             onClick={handleResetPurchases}
@@ -459,15 +514,27 @@ export default function AdminDashboard() {
               Histórico de Vendas Pix
             </span>
 
-            {/* Filter buttons */}
-            <div className="flex items-center gap-1.5 text-xs">
+            {/* Actions & Filter buttons */}
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setOrderFilter('all')}
-                className={`px-2.5 py-1 rounded-lg ${orderFilter === 'all' ? 'bg-neutral-800 text-white font-bold' : 'text-neutral-500 hover:text-neutral-300'}`}
+                disabled={isSyncingMp}
+                onClick={() => handleSyncMercadoPago(false)}
+                className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-400 font-bold text-xs flex items-center gap-1 transition cursor-pointer"
+                title="Sincronizar pagamentos pendentes com a API do Mercado Pago"
               >
-                Todos ({orders.length})
+                {isSyncingMp ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                <span>Sincronizar Vendas MP</span>
               </button>
+
+              <div className="flex items-center gap-1.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setOrderFilter('all')}
+                  className={`px-2.5 py-1 rounded-lg ${orderFilter === 'all' ? 'bg-neutral-800 text-white font-bold' : 'text-neutral-500 hover:text-neutral-300'}`}
+                >
+                  Todos ({orders.length})
+                </button>
               <button
                 type="button"
                 onClick={() => setOrderFilter('paid')}
@@ -484,6 +551,7 @@ export default function AdminDashboard() {
               </button>
             </div>
           </div>
+        </div>
 
           <div className="divide-y divide-neutral-800 max-h-[500px] overflow-y-auto">
             {filteredOrders.length === 0 ? (

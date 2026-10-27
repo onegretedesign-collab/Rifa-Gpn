@@ -1,10 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { db, simulatePixPaymentConfirmation } from '../services/firebaseConfig';
-import { CheckCircle2, Copy, Check, Clock, Loader2, ArrowLeft, Zap, ShieldAlert, Sparkles } from 'lucide-react';
+import { db, markOrderAsPaid, simulatePixPaymentConfirmation } from '../services/firebaseConfig';
+import { CheckCircle2, Copy, Check, Clock, Loader2, ArrowLeft, Zap, ShieldCheck, Sparkles, MessageCircle, ExternalLink, RefreshCw, Ticket, CheckCheck } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { formatCurrency, formatTicketNumber, formatCpf } from '../utils/raffle';
+import { formatCurrency, formatTicketNumber, formatCpf, generateWhatsAppTicketMessage, generateWhatsAppLink } from '../utils/raffle';
 import confetti from 'canvas-confetti';
 import { useToast } from '../components/Toast';
 
@@ -17,7 +17,10 @@ export default function PixPayment() {
   const [copied, setCopied] = useState<boolean>(false);
   const [isSuccess, setIsSuccess] = useState<boolean>(false);
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
+  const [isCheckingStatus, setIsCheckingStatus] = useState<boolean>(false);
   const [timeLeft, setTimeLeft] = useState<number>(15 * 60); // 15 minutes countdown
+  const [autoOpenedWa, setAutoOpenedWa] = useState<boolean>(false);
+  const pollIntervalRef = useRef<any>(null);
 
   // Real-time listener for order status changes
   useEffect(() => {
@@ -27,24 +30,20 @@ export default function PixPayment() {
     const unsubscribe = onSnapshot(orderRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        setOrder(data);
+        setOrder({ id: docSnap.id, ...data });
         setLoading(false);
 
         if (data.status === 'paid') {
           setIsSuccess(true);
-          setTimeout(() => {
-            toast.success('Pagamento Pix processado com sucesso! Seus números foram emitidos.', 'Pagamento Aprovado');
-          }, 50);
           try {
             confetti({
-              particleCount: 80,
+              particleCount: 90,
               spread: 70,
               origin: { y: 0.6 }
             });
           } catch (e) {
             // ignore confetti in non-browser environment
           }
-          setTimeout(() => navigate(`/comprovante/${orderId}`), 1800);
         } else if (data.status === 'expired') {
           navigate('/');
         }
@@ -54,9 +53,65 @@ export default function PixPayment() {
     });
 
     return () => unsubscribe();
-  }, [orderId, navigate, toast]);
+  }, [orderId, navigate]);
 
-  // Countdown timer for 15-minute expiration
+  // Active Real-Time Polling: Checks Mercado Pago API every 2.5s while pending
+  useEffect(() => {
+    if (!order || order.status !== 'pending' || isSuccess) {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      return;
+    }
+
+    const paymentId = order.pix_payment_id || order.paymentId;
+    if (!paymentId) return;
+
+    const checkPayment = async () => {
+      try {
+        const res = await fetch(`/api/pix-status/${paymentId}`);
+        if (res.ok) {
+          const result = await res.json();
+          if (result.is_approved || result.payment_status === 'approved') {
+            if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+            await markOrderAsPaid(order.id || orderId!, String(paymentId), result.raw);
+            setIsSuccess(true);
+            toast.success('Pagamento Pix aprovado com sucesso!', 'Pix Confirmado');
+          }
+        }
+      } catch (err) {
+        // silent retry
+      }
+    };
+
+    pollIntervalRef.current = setInterval(checkPayment, 2500);
+
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
+  }, [order?.status, order?.pix_payment_id, order?.paymentId, isSuccess, order?.id, orderId, toast]);
+
+  // Auto-open WhatsApp on approval
+  useEffect(() => {
+    if (isSuccess && order && !autoOpenedWa && order.buyer_phone) {
+      setAutoOpenedWa(true);
+      const waMsg = generateWhatsAppTicketMessage({
+        buyerName: order.buyer_name,
+        buyerPhone: order.buyer_phone,
+        orderId: order.id || orderId,
+        selectedNumbers: order.selected_numbers || [],
+        totalAmount: order.total_amount,
+        totalTickets: 300
+      });
+      const waUrl = generateWhatsAppLink(order.buyer_phone, waMsg);
+
+      const timer = setTimeout(() => {
+        window.open(waUrl, '_blank', 'noopener,noreferrer');
+      }, 800);
+
+      return () => clearTimeout(timer);
+    }
+  }, [isSuccess, order, autoOpenedWa, orderId]);
+
+  // Countdown timer for expiration
   useEffect(() => {
     if (isSuccess) return;
     const interval = setInterval(() => {
@@ -83,15 +138,44 @@ export default function PixPayment() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleManualCheckStatus = async () => {
+    const paymentId = order?.pix_payment_id || order?.paymentId;
+    if (!paymentId) return;
+
+    setIsCheckingStatus(true);
+    try {
+      const res = await fetch(`/api/pix-status/${paymentId}`);
+      if (res.ok) {
+        const result = await res.json();
+        if (result.is_approved || result.payment_status === 'approved') {
+          await markOrderAsPaid(order.id || orderId!, String(paymentId), result.raw);
+          setIsSuccess(true);
+          toast.success('Pagamento identificado e aprovado!', 'Sucesso');
+        } else {
+          toast.info(
+            `Status atual: ${result.payment_status || 'Aguardando'}. Assim que o banco confirmar, a tela atualizará automaticamente.`,
+            'Aguardando Liquidação'
+          );
+        }
+      } else {
+        toast.error('Não foi possível verificar no momento. Tente novamente em alguns segundos.');
+      }
+    } catch (err) {
+      toast.error('Erro de conexão ao verificar status.');
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
   const handleSimulatePayment = async () => {
     if (!orderId) return;
     setIsSimulating(true);
     try {
       await simulatePixPaymentConfirmation(orderId);
-      // The onSnapshot listener will immediately receive the update and transition the UI!
+      setIsSuccess(true);
     } catch (err) {
       console.error(err);
-      alert('Erro ao confirmar pagamento de teste.');
+      toast.error('Erro ao confirmar pagamento de teste.');
     } finally {
       setIsSimulating(false);
     }
@@ -105,19 +189,95 @@ export default function PixPayment() {
     );
   }
 
-  if (isSuccess) {
+  // Visual state when payment is approved: auto-notified with direct WhatsApp and receipt
+  if (isSuccess && order) {
+    const waMsg = generateWhatsAppTicketMessage({
+      buyerName: order.buyer_name,
+      buyerPhone: order.buyer_phone,
+      orderId: order.id || orderId,
+      selectedNumbers: order.selected_numbers || [],
+      totalAmount: order.total_amount,
+      totalTickets: 300
+    });
+    const waUrl = generateWhatsAppLink(order.buyer_phone, waMsg);
+
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center bg-neutral-950">
-        <div className="w-20 h-20 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center mb-4 animate-bounce shadow-xl shadow-emerald-500/20">
-          <CheckCircle2 className="w-12 h-12" />
-        </div>
-        <h2 className="text-2xl font-black text-white">Pagamento Confirmado!</h2>
-        <p className="text-sm text-neutral-400 mt-2 max-w-xs">
-          O Mercado Pago confirmou seu Pix com sucesso. Carregando seus bilhetes da sorte...
-        </p>
-        <div className="mt-6 flex items-center gap-2 text-xs text-emerald-400 font-mono">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          <span>Gerando seu comprovante oficial...</span>
+      <div className="min-h-screen flex flex-col items-center justify-center p-4 py-12 bg-neutral-950">
+        <div className="w-full max-w-md bg-neutral-900 border border-emerald-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-center space-y-5">
+          {/* Success Check Icon */}
+          <div className="w-20 h-20 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shadow-xl shadow-emerald-500/20 animate-bounce">
+            <CheckCircle2 className="w-12 h-12 stroke-[2.5]" />
+          </div>
+
+          <div>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 inline-block mb-2">
+              Liquidação Mercado Pago Concluída
+            </span>
+            <h2 className="text-2xl font-black text-white">Pagamento Confirmado!</h2>
+            <p className="text-xs text-neutral-300 mt-1 max-w-sm mx-auto">
+              Parabéns, <strong className="text-white">{order.buyer_name}</strong>! Seus números da sorte já foram registrados e reservados no banco de dados.
+            </p>
+          </div>
+
+          {/* Reserved Numbers Card */}
+          <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-4 text-left space-y-2.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-neutral-400 font-semibold flex items-center gap-1.5">
+                <Ticket className="w-4 h-4 text-emerald-400" />
+                Seus Bilhetes Emitidos:
+              </span>
+              <span className="text-emerald-400 font-mono font-bold text-xs">
+                {order.selected_numbers?.length} número(s)
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
+              {order.selected_numbers?.map((num: number) => (
+                <span
+                  key={num}
+                  className="px-2.5 py-1 bg-neutral-900 border border-emerald-500/30 text-emerald-400 font-mono font-bold text-xs rounded-xl shadow-sm"
+                >
+                  {formatTicketNumber(num)}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* WhatsApp Direct Action Button */}
+          <div className="space-y-2 pt-1">
+            <a
+              href={waUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => toast.success('Abrindo WhatsApp!', 'WhatsApp')}
+              className="w-full py-3.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-2xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition active:scale-[0.98] cursor-pointer"
+            >
+              <MessageCircle className="w-4 h-4 fill-current" />
+              <span>Salvar Meus Bilhetes no WhatsApp</span>
+            </a>
+
+            <div className="grid grid-cols-2 gap-2">
+              <Link
+                to={`/comprovante/${order.id || orderId}`}
+                className="py-3 px-3 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 hover:border-neutral-700 text-neutral-200 font-semibold rounded-2xl text-xs flex items-center justify-center gap-1.5 transition"
+              >
+                <span>Ver Comprovante</span>
+                <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+              </Link>
+
+              <Link
+                to="/meus-bilhetes"
+                className="py-3 px-3 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 hover:border-neutral-700 text-neutral-200 font-semibold rounded-2xl text-xs flex items-center justify-center gap-1.5 transition"
+              >
+                <span>Consultar Cotas</span>
+              </Link>
+            </div>
+          </div>
+
+          {/* Live draw rule note */}
+          <p className="text-[10px] text-neutral-500 leading-relaxed font-sans pt-2 border-t border-neutral-800">
+            O sorteio oficial será realizado após a venda de todos os 300 números. Você receberá o aviso do sorteio ao vivo pelo WhatsApp cadastrado.
+          </p>
         </div>
       </div>
     );
@@ -212,10 +372,26 @@ export default function PixPayment() {
           </button>
         </div>
 
-        {/* Automatic detection notice */}
-        <div className="flex items-center justify-center gap-2 text-xs text-neutral-500 pt-1">
-          <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-          <span>Identificação automática após o pagamento</span>
+        {/* Automatic detection notice & Manual Check Button */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-center gap-2 text-xs text-neutral-400 pt-1">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+            <span>Identificando pagamento no banco em tempo real...</span>
+          </div>
+
+          <button
+            type="button"
+            disabled={isCheckingStatus}
+            onClick={handleManualCheckStatus}
+            className="w-full py-2.5 px-3 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 rounded-xl text-xs font-semibold text-neutral-300 hover:text-white flex items-center justify-center gap-1.5 transition cursor-pointer"
+          >
+            {isCheckingStatus ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+            ) : (
+              <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+            <span>Já paguei, verificar agora</span>
+          </button>
         </div>
 
         {/* Instant Sandbox/Test Payment Simulator Button */}

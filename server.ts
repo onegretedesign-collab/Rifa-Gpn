@@ -99,7 +99,7 @@ app.post('/api/pix-rifa', async (req, res) => {
   }
 });
 
-// 2. Consulta de Status do Pix Mercado Pago
+// 2. Consulta de Status do Pix Mercado Pago com Detecção de Pagamento Aprovado
 app.get('/api/pix-status/:paymentId', async (req, res) => {
   try {
     const { paymentId } = req.params;
@@ -107,13 +107,17 @@ app.get('/api/pix-status/:paymentId', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'ID do pagamento não informado.' });
     }
 
-    const mpPayment = await payment.get({ id: paymentId });
+    const mpPayment = await payment.get({ id: String(paymentId) });
+    const isApproved = mpPayment.status === 'approved';
+
     return res.status(200).json({
       status: 'success',
       payment_id: mpPayment.id,
       payment_status: mpPayment.status, // 'approved', 'pending', 'rejected', etc.
+      is_approved: isApproved,
       status_detail: mpPayment.status_detail,
-      amount: mpPayment.transaction_amount
+      amount: mpPayment.transaction_amount,
+      date_approved: mpPayment.date_approved
     });
   } catch (error: any) {
     console.error('Erro ao consultar status no Mercado Pago:', error);
@@ -121,19 +125,52 @@ app.get('/api/pix-status/:paymentId', async (req, res) => {
   }
 });
 
-// 3. Webhook para Notificação Instantânea de Pagamento (IPN Mercado Pago)
+// 3. Verificação em Lote de Pedidos Pendentes contra o Mercado Pago
+app.post('/api/check-pending-orders', async (req, res) => {
+  try {
+    const { orders } = req.body; // Array de { orderId, paymentId }
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return res.status(200).json({ status: 'success', approved: [] });
+    }
+
+    const approvedList: Array<{ orderId: string; paymentId: string; amount: number; date_approved?: string }> = [];
+
+    for (const item of orders) {
+      if (!item.paymentId) continue;
+      try {
+        const mpPayment = await payment.get({ id: String(item.paymentId) });
+        if (mpPayment.status === 'approved') {
+          approvedList.push({
+            orderId: item.orderId,
+            paymentId: String(mpPayment.id),
+            amount: Number(mpPayment.transaction_amount || 0),
+            date_approved: mpPayment.date_approved
+          });
+        }
+      } catch (e) {
+        // Ignora erro individual e continua os demais
+      }
+    }
+
+    return res.status(200).json({ status: 'success', approved: approvedList });
+  } catch (error: any) {
+    console.error('Erro na checagem em lote:', error);
+    return res.status(500).json({ status: 'error', message: error?.message });
+  }
+});
+
+// 4. Webhook para Notificação Instantânea de Pagamento (IPN Mercado Pago)
 app.post('/api/webhook/mercadopago', async (req, res) => {
   try {
     const paymentId = req.body?.data?.id || req.query?.['data.id'] || req.query?.id;
     if (paymentId) {
       const mpPayment = await payment.get({ id: String(paymentId) });
       console.log(`[Webhook MP] Notificação recebida para ID: ${paymentId}, Status: ${mpPayment.status}`);
-      // Status aprovado
     }
     return res.status(200).send('OK');
   } catch (err: any) {
     console.error('[Webhook MP] Erro:', err?.message);
-    return res.status(200).send('OK'); // Sempre responde 200 para evitar retentativas desnecessárias
+    return res.status(200).send('OK');
   }
 });
 

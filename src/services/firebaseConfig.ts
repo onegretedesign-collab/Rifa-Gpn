@@ -32,6 +32,10 @@ export interface Order {
   createdAt: any;
   paidAt?: any;
   pix_code?: string;
+  pix_payment_id?: string | number;
+  pix_expiration?: string;
+  buyer_cpf?: string;
+  buyer_email?: string;
   paymentId?: string;
   paymentDetails?: {
     method: string;
@@ -446,7 +450,11 @@ export function onSnapshot(
  * 2. Marks tickets as 'paid' with buyer_id and order_id
  * 3. Triggers real-time listeners across all subscribed UI pages!
  */
-export async function simulatePixPaymentConfirmation(orderId: string): Promise<boolean> {
+export async function markOrderAsPaid(
+  orderId: string, 
+  paymentId?: string, 
+  paymentDetails?: { method: string; amount: number }
+): Promise<boolean> {
   const orders = collections.orders || [];
   const orderIndex = orders.findIndex(o => o.id === orderId);
   if (orderIndex < 0) return false;
@@ -459,8 +467,8 @@ export async function simulatePixPaymentConfirmation(orderId: string): Promise<b
     ...order,
     status: 'paid',
     paidAt,
-    paymentId: 'MP-PIX-' + Math.floor(Math.random() * 1000000),
-    paymentDetails: {
+    paymentId: paymentId || order.paymentId || ('MP-' + Date.now().toString().slice(-8)),
+    paymentDetails: paymentDetails || {
       method: 'pix',
       amount: order.total_amount
     }
@@ -490,9 +498,18 @@ export async function simulatePixPaymentConfirmation(orderId: string): Promise<b
     }
   });
 
+  // Salva no LocalStorage persistente para sobreviver a recargas de página
+  setStoredData('orders', orders);
+  setStoredData('tickets', collections.tickets);
+
+  // Notifica todos os ouvintes reativos em tempo real
   notifySubscribers('orders');
   notifySubscribers('tickets');
   return true;
+}
+
+export async function simulatePixPaymentConfirmation(orderId: string): Promise<boolean> {
+  return markOrderAsPaid(orderId, 'MP-PIX-' + Math.floor(Math.random() * 1000000));
 }
 
 export function resetAllPurchases() {
