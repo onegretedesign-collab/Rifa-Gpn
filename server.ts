@@ -27,7 +27,7 @@ const DEFAULT_CAMPAIGN = {
   description: 'Que tal ter um show completo do Grupo Part Negra para seu evento, sua confraternização por apenas R$ 59,90 por número! Podendo escolher a data que preferir!',
   price_per_ticket: 59.90,
   total_tickets: 300,
-  imageUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=1200&q=80',
+  imageUrl: 'https://i.postimg.cc/PqCc2GLm/fundo.png',
   status: 'active',
   createdAt: new Date().toISOString(),
   featured: true

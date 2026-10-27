@@ -98,7 +98,7 @@ export default function AdminDashboard() {
       description: description.trim() || 'Participe agora deste super sorteio oficial!',
       price_per_ticket: parseFloat(price.replace(',', '.')),
       total_tickets: parseInt(totalTickets, 10) || 1000,
-      imageUrl: imageUrl.trim() || 'https://images.unsplash.com/photo-1518609878373-06d740f60d8b?auto=format&fit=crop&w=800&q=80',
+      imageUrl: imageUrl.trim() || 'https://i.postimg.cc/PqCc2GLm/fundo.png',
       status: 'active',
       createdAt: serverTimestamp()
     });

@@ -60,7 +60,7 @@ const DEFAULT_CAMPAIGNS: Campaign[] = [
     description: 'Que tal ter um show completo do Grupo Part Negra para seu evento, sua confraternização por apenas R$ 59,90 por número! Podendo escolher a data que preferir!',
     price_per_ticket: 59.90,
     total_tickets: 300,
-    imageUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=1200&q=80',
+    imageUrl: 'https://i.postimg.cc/PqCc2GLm/fundo.png',
     status: 'active',
     createdAt: new Date().toISOString(),
     featured: true
@@ -91,8 +91,15 @@ function setStoredData<T>(collectionName: string, data: T[]) {
 }
 
 // In-memory active stores
+const initialCampaigns = getStoredData('campaigns', DEFAULT_CAMPAIGNS).map((c: any) => {
+  if (c.id === 'camp_part_negra' && (c.imageUrl?.includes('unsplash') || !c.imageUrl)) {
+    return { ...c, imageUrl: 'https://i.postimg.cc/PqCc2GLm/fundo.png' };
+  }
+  return c;
+});
+
 const collections: Record<string, any[]> = {
-  campaigns: getStoredData('campaigns', DEFAULT_CAMPAIGNS),
+  campaigns: initialCampaigns,
   orders: getStoredData('orders', []),
   tickets: getStoredData('tickets', [])
 };

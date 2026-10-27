@@ -467,13 +467,14 @@ export default function Home() {
         <div className="space-y-4">
           {/* Hero do Prêmio Único: Show Completo do Grupo Part Negra */}
           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden shadow-2xl relative">
-            <div className="relative aspect-video w-full overflow-hidden bg-neutral-950">
+            <div className="relative aspect-[4/5] w-full overflow-hidden bg-neutral-950">
               <img
-                src={campaign.imageUrl}
+                src={campaign.imageUrl || 'https://i.postimg.cc/PqCc2GLm/fundo.png'}
                 alt={campaign.title}
-                className="w-full h-full object-cover transition duration-300 hover:scale-105"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/banner_fundo.png'; }}
+                className="w-full h-full object-cover object-top transition duration-300 hover:scale-[1.02]"
               />
-              <div className="absolute inset-0 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-black/30" />
+              <div className="absolute inset-0 bg-gradient-to-t from-neutral-900 via-neutral-900/10 to-black/25 pointer-events-none" />
               
               <div className="absolute top-3 left-3 flex flex-wrap gap-2">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 px-3 py-1 rounded-full bg-neutral-950/85 backdrop-blur-md border border-emerald-500/30 flex items-center gap-1.5 shadow-lg">
@@ -826,8 +827,9 @@ export default function Home() {
             <div className="space-y-3">
               <div className="p-3 bg-neutral-950 rounded-2xl border border-neutral-800 flex items-center gap-3">
                 <img
-                  src={campaign?.imageUrl}
+                  src={campaign?.imageUrl || 'https://i.postimg.cc/PqCc2GLm/fundo.png'}
                   alt={campaign?.title}
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/banner_fundo.png'; }}
                   className="w-12 h-12 rounded-xl object-cover bg-neutral-900 border border-neutral-800 flex-shrink-0"
                 />
                 <div className="overflow-hidden">
