@@ -57,13 +57,13 @@ export interface Ticket {
 const STORAGE_KEY_PREFIX = 'rifas_gpn_db_';
 const BROADCAST_EVENT = 'rifas_gpn_db_update';
 
-// Initial seed campaign: Show Completo do Grupo Part Negra (300 numbers, R$ 50,00)
+// Initial seed campaign: Show Completo do Grupo Part Negra (300 numbers, R$ 59,90)
 const DEFAULT_CAMPAIGNS: Campaign[] = [
   {
     id: 'camp_part_negra',
     title: 'Show Completo do Grupo Part Negra',
-    description: 'Que tal ter um show completo do Grupo Part Negra para seu evento, sua confraternização por apenas R$ 50,00 por número! Podendo escolher a data que preferir!',
-    price_per_ticket: 50.00,
+    description: 'Que tal ter um show completo do Grupo Part Negra para seu evento, sua confraternização por apenas R$ 59,90 por número! Podendo escolher a data que preferir!',
+    price_per_ticket: 59.90,
     total_tickets: 300,
     imageUrl: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=1200&q=80',
     status: 'active',
@@ -115,11 +115,11 @@ const collections: Record<string, any[]> = {
   tickets: getStoredData('tickets', [])
 };
 
-// Ensure single campaign for Grupo Part Negra (300 numbers, R$ 50,00)
+// Ensure single campaign for Grupo Part Negra (300 numbers, R$ 59,90)
 if (
   !collections.campaigns.some(c => c.id === 'camp_part_negra') ||
   collections.campaigns.length !== 1 ||
-  collections.campaigns.some(c => c.id === 'camp_part_negra' && (c.price_per_ticket !== 50.00))
+  collections.campaigns.some(c => c.id === 'camp_part_negra' && (c.price_per_ticket !== 59.90))
 ) {
   collections.campaigns = [...DEFAULT_CAMPAIGNS];
   setStoredData('campaigns', collections.campaigns);

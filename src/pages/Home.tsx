@@ -112,7 +112,7 @@ export default function Home() {
   }, [campaign?.id]);
 
   const totalTickets = campaign?.total_tickets || 300;
-  const pricePerTicket = Number(campaign?.price_per_ticket || 50.00);
+  const pricePerTicket = Number(campaign?.price_per_ticket || 59.90);
 
   // Progress of funds and remaining numbers
   const progress = useMemo(() => {
@@ -127,7 +127,7 @@ export default function Home() {
   // Share functionality
   const shareUrl = typeof window !== 'undefined' ? window.location.href : '';
   const shareTitle = campaign?.title || 'Show Completo do Grupo Part Negra - Rifa Oficial';
-  const shareMessage = `*${shareTitle}!* 🎶\nQue tal ter um show completo do Grupo Part Negra para seu evento ou confraternização por apenas R$ 50,00 por número!\n\nGaranta já o seu número da sorte antes que acabe:\n${shareUrl}`;
+  const shareMessage = `*${shareTitle}!* 🎶\nQue tal ter um show completo do Grupo Part Negra para seu evento ou confraternização por apenas R$ 59,90 por número!\n\nGaranta já o seu número da sorte antes que acabe:\n${shareUrl}`;
 
   const handleShareNativeOrModal = async () => {
     if (navigator.share) {
@@ -517,9 +517,9 @@ export default function Home() {
                 <span>Podendo escolher a data que preferir!</span>
               </div>
 
-              {/* Frase Solicitada com R$ 50,00 */}
+              {/* Frase Solicitada com R$ 59,90 */}
               <div className="mt-3.5 p-3.5 rounded-2xl bg-neutral-950 border border-neutral-800 text-xs text-neutral-300 leading-relaxed font-medium">
-                Que tal ter um show completo do <strong className="text-white">Grupo Part Negra</strong> para seu evento, sua confraternização por apenas <strong className="text-emerald-400 font-mono font-bold">R$ 50,00 por número</strong>!
+                Que tal ter um show completo do <strong className="text-white">Grupo Part Negra</strong> para seu evento, sua confraternização por apenas <strong className="text-emerald-400 font-mono font-bold">R$ 59,90 por número</strong>!
               </div>
 
               {/* Barra de Ações: Compartilhar Rifa */}

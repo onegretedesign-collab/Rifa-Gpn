@@ -47,6 +47,8 @@ test('formatTicketNumber pads numbers to specified digits (default 3)', () => {
 });
 
 test('calculateTotal correctly calculates count times price', () => {
+  assert.equal(calculateTotal(1, 59.90), 59.90);
+  assert.equal(calculateTotal(2, 59.90), 119.80);
   assert.equal(calculateTotal(1, 50.0), 50.0);
   assert.equal(calculateTotal(3, 50.0), 150.0);
   assert.equal(calculateTotal(10, 50.0), 500.0);
