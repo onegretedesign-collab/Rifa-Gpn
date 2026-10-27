@@ -85,7 +85,7 @@ export default function TicketGrid({
             </span>
           </div>
           <p className="text-xs text-neutral-400 mt-0.5">
-            Os números que já saíram são marcados automaticamente em todos os aparelhos
+            Os números vendidos são marcados automaticamente em todos os aparelhos
           </p>
         </div>
 
@@ -102,30 +102,43 @@ export default function TicketGrid({
         </div>
       </div>
 
-      {/* Live Counter Badges: Disponíveis vs Já Saíram */}
-      <div className="grid grid-cols-3 gap-2 text-xs">
-        <div className="p-2 sm:p-2.5 rounded-2xl bg-neutral-950 border border-neutral-800 flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="w-2.5 h-2.5 rounded-sm bg-neutral-900 border border-neutral-600 shrink-0" />
-            <span className="text-neutral-300 font-medium text-[11px] sm:text-xs truncate">Disponíveis</span>
+      {/* Live Counter Badges: Disponíveis, Vendidos, Escolhidos */}
+      <div className="grid grid-cols-3 gap-1.5">
+        {/* Disponíveis */}
+        <div className="px-1.5 py-1.5 rounded-xl bg-neutral-950 border border-neutral-800 flex items-center justify-between gap-1 shadow-sm">
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-neutral-500 shrink-0" />
+            <span className="text-neutral-400 font-semibold text-[8.5px] tracking-tight whitespace-nowrap">
+              Disponíveis
+            </span>
           </div>
-          <span className="font-mono font-black text-emerald-400 text-xs sm:text-sm shrink-0">{availableCount}</span>
+          <span className="font-mono font-bold text-emerald-400 text-[10.5px] shrink-0">
+            {availableCount}
+          </span>
         </div>
 
-        <div className="p-2 sm:p-2.5 rounded-2xl bg-red-950/20 border border-red-500/30 flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="w-2.5 h-2.5 rounded-sm bg-red-950 border border-red-500/60 shrink-0" />
-            <span className="text-red-300 font-medium text-[11px] sm:text-xs truncate">Já Saíram</span>
+        {/* Vendidos */}
+        <div className="px-1.5 py-1.5 rounded-xl bg-red-950/20 border border-red-500/30 flex items-center justify-between gap-1 shadow-sm">
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+            <span className="text-red-300 font-semibold text-[8.5px] tracking-tight whitespace-nowrap">
+              Vendidos
+            </span>
           </div>
-          <span className="font-mono font-black text-red-400 text-xs sm:text-sm shrink-0">{soldCount}</span>
+          <span className="font-mono font-bold text-red-400 text-[10.5px] shrink-0">
+            {soldCount}
+          </span>
         </div>
 
-        <div className="p-2 sm:p-2.5 rounded-2xl bg-emerald-950/20 border border-emerald-500/30 flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 border border-emerald-400 shrink-0" />
-            <span className="text-emerald-300 font-medium text-[11px] sm:text-xs truncate">Escolhidos</span>
+        {/* Escolhidos */}
+        <div className="px-1.5 py-1.5 rounded-xl bg-emerald-950/20 border border-emerald-500/30 flex items-center justify-between gap-1 shadow-sm">
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+            <span className="text-emerald-300 font-semibold text-[8.5px] tracking-tight whitespace-nowrap">
+              Escolhidos
+            </span>
           </div>
-          <span className="font-mono font-black text-emerald-400 text-xs sm:text-sm shrink-0">
+          <span className="font-mono font-bold text-emerald-400 text-[10.5px] shrink-0">
             {selectedNumbers.length}
           </span>
         </div>
