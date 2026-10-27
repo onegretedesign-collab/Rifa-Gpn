@@ -1,0 +1,6 @@
+{
+  "name": "Rifas GPN",
+  "description": "Plataforma profissional de rifas e sorteios online com integração Pix Mercado Pago, baixa em tempo real e consulta de bilhetes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

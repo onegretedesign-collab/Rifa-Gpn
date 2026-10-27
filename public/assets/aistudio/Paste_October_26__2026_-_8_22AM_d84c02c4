@@ -1,0 +1,866 @@
+Markdown
+# ESPECIFICAÇÃO DE PROJETO: RIFAS GPN (Fullstack Web App)
+
+Atue como Engenheiro de Software Fullstack Sênior especialista em React, Tailwind CSS, Firebase (Firestore, Auth, Cloud Functions) e Integração Pix (Mercado Pago). Implemente a solução completa conforme os arquivos e especificações estruturadas abaixo.
+
+---
+
+## 1. ESTRUTURA DE DIRETÓRIOS DO PROJETO
+
+```text
+rifas-gpn/
+├── firestore.rules
+├── functions/
+│   ├── package.json
+│   └── index.js                 # Webhook Pix + Agendador de expiração
+└── src/
+    ├── services/
+    │   └── firebaseConfig.js    # Conexão modular do Firebase
+    ├── components/
+    │   ├── Navbar.jsx           # Cabeçalho com link para Meus Bilhetes
+    │   └── TicketGrid.jsx       # Grade interativa de cotas com paginação
+    ├── pages/
+    │   ├── Home.jsx             # Vitrine da campanha ativa e seleção de cotas
+    │   ├── PixPayment.jsx       # Checkout com QR Code Pix e Listener em tempo real
+    │   ├── ReceiptScreen.jsx    # Comprovante final otimizado para impressão/PDF
+    │   ├── MyTicketsScreen.jsx  # Consulta por WhatsApp das cotas compradas
+    │   └── AdminDashboard.jsx   # Gestão de rifas e KPIs de faturamento
+    ├── App.jsx                  # Roteamento completo (React Router v6)
+    └── index.css                # Diretivas Tailwind CSS
+2. REGRAS DE SEGURANÇA (firestore.rules)
+JavaScript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidInitialOrder() {
+      return request.resource.data.status == 'pending'
+        && request.resource.data.total_amount is number
+        && request.resource.data.total_amount > 0
+        && request.resource.data.selected_numbers is list
+        && request.resource.data.selected_numbers.size() > 0
+        && request.resource.data.buyer_phone is string
+        && request.resource.data.buyer_name is string
+        && request.resource.data.buyer_name.size() >= 3;
+    }
+
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow write: if false; // Gerenciado apenas via Admin SDK
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if true;
+      allow write: if false; // Reserva/Baixa exclusivas do backend
+    }
+
+    match /orders/{orderId} {
+      allow get: if true;
+      allow list: if request.query.limit <= 50;
+      allow create: if hasRequiredFields([
+          'campaign_id', 
+          'buyer_name', 
+          'buyer_phone', 
+          'selected_numbers', 
+          'total_amount', 
+          'status', 
+          'createdAt'
+        ])
+        && isValidInitialOrder()
+        && !('paidAt' in request.resource.data);
+      allow update, delete: if false; // O cliente NUNCA altera status para pago
+    }
+  }
+}
+3. BACKEND & WEBHOOK (functions/index.js)
+JavaScript
+const { onRequest } = require("firebase-functions/v2/https");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const admin = require("firebase-admin");
+const { MercadoPagoConfig, Payment } = require("mercadopago");
+
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
+const db = admin.firestore();
+
+const mpClient = new MercadoPagoConfig({ 
+  accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN 
+});
+
+// 1. Webhook que recebe a confirmação de pagamento Pix do Mercado Pago
+exports.pixWebhook = onRequest(async (req, res) => {
+  try {
+    const paymentId = req.body?.data?.id || req.query["data.id"] || req.query.id;
+
+    if (!paymentId) {
+      return res.status(200).send("Sem ID de pagamento.");
+    }
+
+    // Consulta reversa na API do Mercado Pago para evitar requisições falsas
+    const paymentInstance = new Payment(mpClient);
+    const payment = await paymentInstance.get({ id: paymentId });
+
+    if (payment.status === "approved") {
+      const orderId = payment.external_reference;
+      if (!orderId) return res.status(200).send("Sem external_reference.");
+
+      // Transação Atômica: Atualiza Pedido + Atualiza Cotas simultaneamente
+      await db.runTransaction(async (transaction) => {
+        const orderRef = db.collection("orders").doc(orderId);
+        const orderDoc = await transaction.get(orderRef);
+
+        if (!orderDoc.exists) throw new Error("Pedido não encontrado.");
+        const orderData = orderDoc.data();
+
+        // Idempotência: Evita reprocessamento
+        if (orderData.status === "paid") return;
+
+        transaction.update(orderRef, {
+          status: "paid",
+          paymentId: paymentId,
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+          paymentDetails: {
+            method: payment.payment_method_id,
+            amount: payment.transaction_amount
+          }
+        });
+
+        const campaignId = orderData.campaign_id;
+        orderData.selected_numbers.forEach((num) => {
+          const ticketRef = db.collection("tickets").doc(`${campaignId}_${num}`);
+          transaction.set(ticketRef, {
+            campaign_id: campaignId,
+            number: num,
+            status: "paid",
+            buyer_id: orderData.buyer_phone,
+            buyer_name: orderData.buyer_name,
+            order_id: orderId,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+        });
+      });
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    console.error("Erro no Webhook Pix:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// 2. Cron Job para liberar cotas reservadas não pagas após 15 minutos
+exports.releaseExpiredTickets = onSchedule("every 5 minutes", async () => {
+  const threshold = new Date(Date.now() - 15 * 60 * 1000);
+
+  const snapshot = await db.collection("orders")
+    .where("status", "==", "pending")
+    .where("createdAt", "<", threshold)
+    .get();
+
+  if (snapshot.empty) return;
+
+  const batch = db.batch();
+  snapshot.forEach((orderDoc) => {
+    const data = orderDoc.data();
+    batch.update(orderDoc.ref, { 
+      status: "expired", 
+      expiredAt: admin.firestore.FieldValue.serverTimestamp() 
+    });
+
+    data.selected_numbers.forEach((num) => {
+      const ticketRef = db.collection("tickets").doc(`${data.campaign_id}_${num}`);
+      batch.update(ticketRef, {
+        status: "available",
+        buyer_id: null,
+        buyer_name: null,
+        order_id: null
+      });
+    });
+  });
+
+  await batch.commit();
+});
+4. CONFIGURAÇÃO FIREBASE FRONTEND (src/services/firebaseConfig.js)
+JavaScript
+import { initializeApp } from 'firebase/app';
+import { getFirestore } from 'firebase/firestore';
+
+const firebaseConfig = {
+  apiKey: "SUA_API_KEY",
+  authDomain: "seu-projeto.firebaseapp.com",
+  projectId: "seu-projeto",
+  storageBucket: "seu-projeto.appspot.com",
+  messagingSenderId: "000000000000",
+  appId: "1:000000000000:web:000000000000"
+};
+
+const app = initializeApp(firebaseConfig);
+export const db = getFirestore(app);
+5. ROTEADOR PRINCIPAL (src/App.jsx)
+JavaScript
+import React from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import Home from './pages/Home';
+import PixPayment from './pages/PixPayment';
+import ReceiptScreen from './pages/ReceiptScreen';
+import MyTicketsScreen from './pages/MyTicketsScreen';
+import AdminDashboard from './pages/AdminDashboard';
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <div className="bg-neutral-950 min-h-screen text-neutral-100 font-sans selection:bg-emerald-500 selection:text-neutral-950">
+        <Routes>
+          <Route element="{<Home" path="/"/>} />
+          <Route element="{<PixPayment" path="/pagamento/:orderId"/>} />
+          <Route element="{<ReceiptScreen" path="/comprovante/:orderId"/>} />
+          <Route element="{<MyTicketsScreen" path="/meus-bilhetes"/>} />
+          <Route element="{<AdminDashboard" path="/admin"/>} />
+        </Routes>
+      </div>
+    </BrowserRouter>
+  );
+}
+6. VITRINE & COMPRA DE COTAS (src/pages/Home.jsx)
+JavaScript
+import React, { useEffect, useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+import { collection, query, where, getDocs, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
+import { Ticket, Sparkles, Search, ShieldCheck, Loader2 } from 'lucide-react';
+
+export default function Home() {
+  const navigate = useNavigate();
+  const [campaign, setCampaign] = useState(null);
+  const [ticketsCount, setTicketsCount] = useState(10);
+  const [buyerName, setBuyerName] = useState('');
+  const [buyerPhone, setBuyerPhone] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    async function loadCampaign() {
+      const q = query(collection(db, 'campaigns'), where('status', '==', 'active'));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        setCampaign({ id: snap.docs[0].id, ...snap.docs[0].data() });
+      }
+      setLoading(false);
+    }
+    loadCampaign();
+  }, []);
+
+  const handlePhoneChange = (e) => {
+    let v = e.target.value.replace(/\D/g, '');
+    if (v.length > 11) v = v.slice(0, 11);
+    if (v.length > 6) v = `(${v.slice(0, 2)}) ${v.slice(2, 7)}-${v.slice(7)}`;
+    else if (v.length > 2) v = `(${v.slice(0, 2)}) ${v.slice(2)}`;
+    setBuyerPhone(v);
+  };
+
+  const handleCheckout = async (e) => {
+    e.preventDefault();
+    if (!campaign || ticketsCount <= 0) return;
+
+    setSubmitting(true);
+    try {
+      // Sorteio aleatório de cotas disponíveis para a compra automática
+      const selectedNumbers = Array.from({ length: ticketsCount }, () => 
+        Math.floor(Math.random() * (campaign.total_tickets || 1000))
+      );
+
+      const totalAmount = ticketsCount * Number(campaign.price_per_ticket || 0.50);
+
+      const orderRef = await addDoc(collection(db, 'orders'), {
+        campaign_id: campaign.id,
+        buyer_name: buyerName,
+        buyer_phone: buyerPhone,
+        selected_numbers: selectedNumbers,
+        total_amount: totalAmount,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        // Mock do código Pix Copia e Cola retornado pela API
+        pix_code: "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426614174000520400005303986540510.005802BR5913RIFAS GPN6008GOIANIA62070503***6304ABCD"
+      });
+
+      navigate(`/pagamento/${orderRef.id}`);
+    } catch (err) {
+      console.error(err);
+      alert('Erro ao gerar pedido.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-emerald-500"/>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-md mx-auto p-4 pb-12">
+      {/* Topo */}
+      <div className="flex items-center justify-between py-4 mb-2">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl bg-emerald-500 flex items-center justify-center text-neutral-950 font-black">
+            R
+          </div>
+          <span className="font-extrabold text-lg tracking-tight">Rifas GPN</span>
+        </div>
+        <Link className="flex items-center gap-1.5 text-xs text-neutral-400 hover:text-white px-3 py-1.5 rounded-xl bg-neutral-900 border border-neutral-800 transition" to="/meus-bilhetes">
+          <Search className="w-3.5 h-3.5"/>
+          Meus Bilhetes
+        </Link>
+      </div>
+
+      {campaign ? (
+        <div className="space-y-5">
+          {/* Hero do Prêmio */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden shadow-xl">
+            <img 
+              src={campaign.imageUrl} 
+              alt={campaign.title} 
+              className="w-full h-56 object-cover"
+            />
+            <div className="p-5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
+                Campanha Ativa
+              </span>
+              <h1 className="text-xl font-extrabold text-white mt-2">{campaign.title}</h1>
+              <p className="text-xs text-neutral-400 mt-1">{campaign.description}</p>
+              
+              <div className="mt-4 pt-4 border-t border-neutral-800 flex items-baseline justify-between">
+                <div>
+                  <p className="text-[11px] text-neutral-500">Por apenas</p>
+                  <p className="text-2xl font-black text-emerald-400 font-mono">
+                    R\$ {Number(campaign.price_per_ticket || 0).toFixed(2).replace('.', ',')}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[11px] text-neutral-500">Total de cotas</p>
+                  <p className="text-sm font-bold text-neutral-300 font-mono">{campaign.total_tickets}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Seletor Rápido de Cotas */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 shadow-xl">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-400 mb-3 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400"/>
+              Selecione a quantidade de cotas
+            </h2>
+
+            <div className="grid grid-cols-4 gap-2 mb-4">
+              {[5, 10, 50, 100].map((qty) => (
+                <button
+                  key={qty}
+                  type="button"
+                  onClick={() => setTicketsCount(qty)}
+                  className={`py-3 rounded-2xl font-mono text-sm font-bold transition ${
+                    ticketsCount === qty
+                      ? 'bg-emerald-500 text-neutral-950 shadow-lg shadow-emerald-500/20'
+                      : 'bg-neutral-950 border border-neutral-800 text-neutral-300 hover:border-neutral-700'
+                  }`}
+                >
+                  +{qty}
+                </button>
+              ))}
+            </div>
+
+            {/* Formulário de Identificação */}
+            <form onSubmit={handleCheckout} className="space-y-3 pt-2">
+              <div>
+                <input
+                  type="text"
+                  required
+                  placeholder="Seu Nome Completo"
+                  value={buyerName}
+                  onChange={(e) => setBuyerName(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl px-4 py-3 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <input
+                  type="tel"
+                  required
+                  placeholder="WhatsApp com DDD: (00) 00000-0000"
+                  value={buyerPhone}
+                  onChange={handlePhoneChange}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl px-4 py-3 text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-emerald-500 font-mono"
+                />
+              </div>
+
+              <div className="p-3 bg-neutral-950 rounded-2xl border border-neutral-800/80 flex items-center justify-between text-xs font-mono">
+                <span className="text-neutral-400">{ticketsCount} cotas x R\$ {Number(campaign.price_per_ticket).toFixed(2)}</span>
+                <span className="font-bold text-white text-sm">
+                  Total: R\$ {(ticketsCount * Number(campaign.price_per_ticket)).toFixed(2).replace('.', ',')}
+                </span>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full py-4 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-2xl text-sm flex items-center justify-center gap-2 transition shadow-xl shadow-emerald-500/20 disabled:opacity-50"
+              >
+                {submitting ? (
+                  <Loader2 className="w-5 h-5 animate-spin"/>
+                ) : (
+                  <>
+                    <Ticket className="w-5 h-5"/>
+                    Participar do Sorteio
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        </div>
+      ) : (
+        <div className="text-center py-20 text-neutral-500 text-xs">
+          Nenhuma rifa ativa no momento.
+        </div>
+      )}
+    </div>
+  );
+}
+7. TELA DE PAGAMENTO COM LISTENER EM TEMPO REAL (src/pages/PixPayment.jsx)
+JavaScript
+import React, { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
+import { CheckCircle2, Copy, Check, Clock, Loader2 } from 'lucide-react';
+
+export default function PixPayment() {
+  const { orderId } = useParams();
+  const navigate = useNavigate();
+  const [order, setOrder] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [isSuccess, setIsSuccess] = useState(false);
+
+  useEffect(() => {
+    if (!orderId) return;
+    const orderRef = doc(db, 'orders', orderId);
+
+    const unsubscribe = onSnapshot(orderRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setOrder(data);
+        setLoading(false);
+
+        if (data.status === 'paid') {
+          setIsSuccess(true);
+          setTimeout(() => navigate(`/comprovante/${orderId}`), 1800);
+        } else if (data.status === 'expired') {
+          navigate('/');
+        }
+      } else {
+        setLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [orderId, navigate]);
+
+  const handleCopy = () => {
+    if (!order?.pix_code) return;
+    navigator.clipboard.writeText(order.pix_code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-emerald-500"/>
+      </div>
+    );
+  }
+
+  if (isSuccess) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+        <div className="w-16 h-16 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-3 animate-bounce">
+          <CheckCircle2 className="w-10 h-10"/>
+        </div>
+        <h2 className="text-xl font-bold text-white">Pagamento Confirmado!</h2>
+        <p className="text-xs text-neutral-400 mt-1">Carregando seus bilhetes da sorte...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col items-center p-4">
+      <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-xl mt-6">
+        <div className="flex items-center justify-between pb-4 border-b border-neutral-800 mb-5">
+          <span className="text-xs text-neutral-400">Rifas GPN</span>
+          <div className="flex items-center gap-1.5 text-amber-400 text-[11px] font-semibold px-2.5 py-1 bg-amber-500/10 rounded-full">
+            <Clock className="w-3.5 h-3.5"/>
+            <span>Aguardando Pagamento</span>
+          </div>
+        </div>
+
+        <div className="text-center mb-6">
+          <p className="text-xs text-neutral-400">Valor a pagar</p>
+          <p className="text-3xl font-black text-white mt-1 font-mono">
+            R\$ {Number(order?.total_amount || 0).toFixed(2).replace('.', ',')}
+          </p>
+          <p className="text-xs text-neutral-400 mt-1">
+            {order?.selected_numbers?.length} cota(s) reservada(s)
+          </p>
+        </div>
+
+        <div className="space-y-3">
+          <label className="text-xs text-neutral-400 font-medium block">Código Pix Copia e Cola:</label>
+          <input
+            type="text"
+            readOnly
+            value={order?.pix_code || ''}
+            className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-3 text-xs text-neutral-400 font-mono truncate focus:outline-none"
+          />
+
+          <button
+            onClick={handleCopy}
+            className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition"
+          >
+            {copied ? <Check className="w-4 h-4"/> : <Copy className="w-4 h-4"/>}
+            {copied ? 'Chave Copiada!' : 'Copiar Chave Pix'}
+          </button>
+        </div>
+
+        <div className="mt-6 flex items-center justify-center gap-2 text-xs text-neutral-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin"/>
+          <span>Identificação automática após o pagamento</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+8. COMPROVANTE & IMPRESSÃO (src/pages/ReceiptScreen.jsx)
+JavaScript
+import React, { useEffect, useState } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
+import { CheckCircle2, Ticket, Printer, Share2, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
+
+export default function ReceiptScreen() {
+  const { orderId } = useParams();
+  const [order, setOrder] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadReceipt() {
+      if (!orderId) return;
+      const snap = await getDoc(doc(db, 'orders', orderId));
+      if (snap.exists()) setOrder({ id: snap.id, ...snap.data() });
+      setLoading(false);
+    }
+    loadReceipt();
+  }, [orderId]);
+
+  const handleShare = () => {
+    if (navigator.share) {
+      navigator.share({
+        title: 'Meus Bilhetes - Rifas GPN',
+        text: `Meus números da sorte no Rifas GPN! Pedido #${orderId?.slice(-6).toUpperCase()}`,
+        url: window.location.href,
+      }).catch(() => {});
+    } else {
+      navigator.clipboard.writeText(window.location.href);
+      alert('Link copiado!');
+    }
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-emerald-500"/></div>;
+  if (!order) return <div className="p-8 text-center text-xs text-neutral-500">Pedido não encontrado.</div>;
+
+  return (
+    <div className="min-h-screen p-4 flex flex-col items-center print:bg-white print:p-0">
+      <div className="w-full max-w-md flex items-center justify-between mb-4 print:hidden">
+        <Link className="text-xs text-neutral-400 hover:text-white flex items-center gap-1" to="/">
+          <ArrowLeft className="w-4 h-4"/> Início
+        </Link>
+        <div className="flex gap-2">
+          <button onClick={() => window.print()} className="p-2 bg-neutral-900 border border-neutral-800 rounded-xl text-neutral-300">
+            <Printer className="w-4 h-4"/>
+          </button>
+          <button onClick={handleShare} className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 border border-neutral-800 rounded-xl text-xs font-semibold text-neutral-300">
+            <Share2 className="w-3.5 h-3.5"/> Compartilhar
+          </button>
+        </div>
+      </div>
+
+      <div className="w-full max-w-md bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden shadow-2xl print:border-neutral-300 print:bg-white print:text-black">
+        <div className="p-6 text-center border-b border-neutral-800">
+          <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-2">
+            <CheckCircle2 className="w-7 h-7"/>
+          </div>
+          <h1 className="text-lg font-bold">Compra Confirmada!</h1>
+          <p className="text-xs text-neutral-400 mt-0.5">Pedido #{order.id.slice(-6).toUpperCase()}</p>
+        </div>
+
+        <div className="p-5 text-xs space-y-2 border-b border-neutral-800 font-mono">
+          <div className="flex justify-between"><span className="text-neutral-400 font-sans">Comprador:</span><span>{order.buyer_name}</span></div>
+          <div className="flex justify-between"><span className="text-neutral-400 font-sans">WhatsApp:</span><span>{order.buyer_phone}</span></div>
+          <div className="flex justify-between"><span className="text-neutral-400 font-sans">Total Pago:</span><span className="text-emerald-400 font-bold">R\$ {Number(order.total_amount).toFixed(2).replace('.', ',')}</span></div>
+        </div>
+
+        <div className="p-5">
+          <p className="text-xs font-bold text-neutral-300 mb-3 flex items-center gap-1.5">
+            <Ticket className="w-4 h-4 text-emerald-400"/>
+            Seus Números ({order.selected_numbers?.length}):
+          </p>
+          <div className="grid grid-cols-4 gap-2 max-h-56 overflow-y-auto pr-1">
+            {order.selected_numbers?.map((n) => (
+              <div key={n} className="py-2 text-center font-mono font-bold text-xs bg-neutral-950 border border-neutral-800 text-emerald-400 rounded-xl select-all">
+                {String(n).padStart(4, '0')}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+9. CONSULTA POR WHATSAPP (src/pages/MyTicketsScreen.jsx)
+JavaScript
+import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { collection, query, where, getDocs, orderBy } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
+import { Search, Phone, Ticket, ArrowLeft, Loader2, ExternalLink } from 'lucide-react';
+
+export default function MyTicketsScreen() {
+  const [phone, setPhone] = useState('');
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [searched, setSearched] = useState(false);
+
+  const handlePhoneChange = (e) => {
+    let v = e.target.value.replace(/\D/g, '');
+    if (v.length > 11) v = v.slice(0, 11);
+    if (v.length > 6) v = `(${v.slice(0, 2)}) ${v.slice(2, 7)}-${v.slice(7)}`;
+    else if (v.length > 2) v = `(${v.slice(0, 2)}) ${v.slice(2)}`;
+    setPhone(v);
+  };
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (phone.replace(/\D/g, '').length < 10) return;
+
+    setLoading(true);
+    setSearched(true);
+
+    try {
+      const q = query(
+        collection(db, 'orders'),
+        where('buyer_phone', '==', phone),
+        where('status', '==', 'paid'),
+        orderBy('paidAt', 'desc')
+      );
+      const snap = await getDocs(q);
+      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto p-4">
+      <div className="flex items-center justify-between mb-6">
+        <Link className="text-xs text-neutral-400 hover:text-white flex items-center gap-1" to="/">
+          <ArrowLeft className="w-4 h-4"/> Voltar
+        </Link>
+        <span className="text-xs font-bold text-neutral-500">Rifas GPN</span>
+      </div>
+
+      <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 mb-5 shadow-xl">
+        <h1 className="text-base font-bold mb-1">Consultar Bilhetes</h1>
+        <p className="text-xs text-neutral-400 mb-4">Veja as cotas associadas ao seu número</p>
+
+        <form onSubmit={handleSearch} className="space-y-3">
+          <div className="relative">
+            <input
+              type="tel"
+              required
+              placeholder="(00) 00000-0000"
+              value={phone}
+              onChange={handlePhoneChange}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-2xl py-3 px-4 pl-10 text-xs text-white focus:outline-none focus:border-emerald-500 font-mono"
+            />
+            <Phone className="w-4 h-4 text-neutral-500 absolute left-3.5 top-3.5"/>
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold rounded-2xl text-xs flex items-center justify-center gap-2 transition"
+          >
+            {loading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Search className="w-4 h-4"/>}
+            Buscar Cotas
+          </button>
+        </form>
+      </div>
+
+      {searched && !loading && (
+        <div className="space-y-3">
+          {orders.length === 0 ? (
+            <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-2xl text-center text-xs text-neutral-400">
+              Nenhuma cota paga associada a este número.
+            </div>
+          ) : (
+            orders.map(order => (
+              <div key={order.id} className="p-4 bg-neutral-900 border border-neutral-800 rounded-2xl">
+                <div className="flex justify-between items-center pb-2 border-b border-neutral-800 text-xs">
+                  <span className="font-bold text-white">Pedido #{order.id.slice(-6).toUpperCase()}</span>
+                  <Link className="text-emerald-400 flex items-center gap-1 text-[11px]" to="{`/comprovante/${order.id}`}">
+                    Recibo <ExternalLink className="w-3 h-3"/>
+                  </Link>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-3 max-h-32 overflow-y-auto">
+                  {order.selected_numbers?.map(n => (
+                    <span key={n} className="px-2 py-1 bg-neutral-950 border border-neutral-800 rounded-lg text-emerald-400 font-mono font-bold text-xs">
+                      {String(n).padStart(4, '0')}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+10. PAINEL DE CONTROLE / DASHBOARD (src/pages/AdminDashboard.jsx)
+JavaScript
+import React, { useEffect, useState } from 'react';
+import { collection, query, onSnapshot, addDoc, updateDoc, doc, serverTimestamp, orderBy } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
+import { DollarSign, Ticket, Layers, Plus, X, ToggleLeft, ToggleRight, Loader2 } from 'lucide-react';
+
+export default function AdminDashboard() {
+  const [campaigns, setCampaigns] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [title, setTitle] = useState('');
+  const [price, setPrice] = useState('');
+  const [totalTickets, setTotalTickets] = useState('1000');
+  const [imageUrl, setImageUrl] = useState('');
+
+  useEffect(() => {
+    const unsubCamp = onSnapshot(query(collection(db, 'campaigns'), orderBy('createdAt', 'desc')), (s) => {
+      setCampaigns(s.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    const unsubOrders = onSnapshot(collection(db, 'orders'), (s) => {
+      setOrders(s.docs.map(d => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    });
+    return () => { unsubCamp(); unsubOrders(); };
+  }, []);
+
+  const paidOrders = orders.filter(o => o.status === 'paid');
+  const totalRevenue = paidOrders.reduce((acc, curr) => acc + Number(curr.total_amount || 0), 0);
+  const totalSold = paidOrders.reduce((acc, curr) => acc + (curr.selected_numbers?.length || 0), 0);
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    await addDoc(collection(db, 'campaigns'), {
+      title,
+      price_per_ticket: parseFloat(price.replace(',', '.')),
+      total_tickets: parseInt(totalTickets, 10),
+      imageUrl: imageUrl || '[https://images.unsplash.com/photo-1518609878373-06d740f60d8b?auto=format&fit=crop&w=600&q=80](https://images.unsplash.com/photo-1518609878373-06d740f60d8b?auto=format&fit=crop&w=600&q=80)',
+      status: 'active',
+      createdAt: serverTimestamp()
+    });
+    setIsModalOpen(false);
+    setTitle(''); setPrice('');
+  };
+
+  const toggleStatus = async (id, currentStatus) => {
+    await updateDoc(doc(db, 'campaigns', id), {
+      status: currentStatus === 'active' ? 'paused' : 'active'
+    });
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-emerald-500"/></div>;
+
+  return (
+    <div className="max-w-5xl mx-auto p-4 sm:p-8 space-y-6">
+      <div className="flex justify-between items-center pb-4 border-b border-neutral-800">
+        <div>
+          <h1 className="text-xl font-bold">Admin Rifas GPN</h1>
+          <p className="text-xs text-neutral-400">Visão financeira e controle</p>
+        </div>
+        <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-1.5 px-4 py-2 bg-emerald-500 text-neutral-950 font-bold rounded-xl text-xs">
+          <Plus className="w-4 h-4"/> Nova Rifa
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-2xl">
+          <span className="text-xs text-neutral-400">Faturamento Realizado</span>
+          <p className="text-2xl font-bold font-mono text-emerald-400 mt-1">R\$ {totalRevenue.toFixed(2).replace('.', ',')}</p>
+        </div>
+        <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-2xl">
+          <span className="text-xs text-neutral-400">Cotas Pagas</span>
+          <p className="text-2xl font-bold font-mono text-white mt-1">{totalSold}</p>
+        </div>
+        <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-2xl">
+          <span className="text-xs text-neutral-400">Total de Pedidos Aprovados</span>
+          <p className="text-2xl font-bold font-mono text-white mt-1">{paidOrders.length}</p>
+        </div>
+      </div>
+
+      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden">
+        <div className="p-4 border-b border-neutral-800 text-xs font-bold uppercase tracking-wider text-neutral-400">
+          Campanhas Cadastradas
+        </div>
+        <div className="divide-y divide-neutral-800">
+          {campaigns.map(camp => (
+            <div key={camp.id} className="p-4 flex items-center justify-between text-xs">
+              <div>
+                <p className="font-bold text-sm text-white">{camp.title}</p>
+                <p className="text-neutral-500 font-mono">Cota: R\$ {Number(camp.price_per_ticket).toFixed(2)} | Total: {camp.total_tickets}</p>
+              </div>
+              <button onClick={() => toggleStatus(camp.id, camp.status)} className="p-2">
+                {camp.status === 'active' ? <ToggleRight className="w-6 h-6 text-emerald-400"/> : <ToggleLeft className="w-6 h-6 text-neutral-500"/>}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-3xl w-full max-w-sm space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-sm">Criar Nova Rifa</h3>
+              <button onClick={() => setIsModalOpen(false)}><X className="w-5 h-5 text-neutral-500"/></button>
+            </div>
+            <form onSubmit={handleCreate} className="space-y-3">
+              <input type="text" required placeholder="Título do Prêmio" value={title} onChange={e => setTitle(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs" />
+              <input type="text" required placeholder="Valor por Cota (Ex: 0.50)" value={price} onChange={e => setPrice(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs font-mono" />
+              <input type="url" placeholder="URL da Foto do Prêmio" value={imageUrl} onChange={e => setImageUrl(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 rounded-xl p-3 text-xs font-mono" />
+              <button type="submit" className="w-full py-3 bg-emerald-500 text-neutral-950 font-bold rounded-xl text-xs">Salvar e Publicar</button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

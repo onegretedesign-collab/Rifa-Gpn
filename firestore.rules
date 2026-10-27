@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidInitialOrder() {
+      return request.resource.data.status == 'pending'
+        && request.resource.data.total_amount is number
+        && request.resource.data.total_amount > 0
+        && request.resource.data.selected_numbers is list
+        && request.resource.data.selected_numbers.size() > 0
+        && request.resource.data.buyer_phone is string
+        && request.resource.data.buyer_name is string
+        && request.resource.data.buyer_name.size() >= 3;
+    }
+
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow write: if false; // Gerenciado apenas via Admin SDK
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if true;
+      allow write: if false; // Reserva/Baixa exclusivas do backend
+    }
+
+    match /orders/{orderId} {
+      allow get: if true;
+      allow list: if request.query.limit <= 50;
+      allow create: if hasRequiredFields([
+          'campaign_id', 
+          'buyer_name', 
+          'buyer_phone', 
+          'selected_numbers', 
+          'total_amount', 
+          'status', 
+          'createdAt'
+        ])
+        && isValidInitialOrder()
+        && !('paidAt' in request.resource.data);
+      allow update, delete: if false; // O cliente NUNCA altera status para pago
+    }
+  }
+}
