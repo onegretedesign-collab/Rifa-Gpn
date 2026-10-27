@@ -1,12 +1,7 @@
 /**
- * Firebase Configuration and Universal Store Adapter for Rifas GPN
- * 
- * Provides full reactive support for Firestore modular APIs:
- * `collection`, `doc`, `query`, `where`, `orderBy`, `getDocs`, `getDoc`,
- * `addDoc`, `updateDoc`, `setDoc`, `onSnapshot`, `serverTimestamp`.
- * 
- * Works out-of-the-box with persistent LocalStorage and real-time event broadcasting,
- * and seamlessly connects to real Firebase if valid VITE_FIREBASE_* credentials are provided.
+ * Centralized Real-Time State Engine & Firestore Compatibility Layer
+ * Connected to Server Authoritative Store (server.ts) with Server-Sent Events (SSE)
+ * Ensures every phone, computer, and terminal sees sold/reserved tickets in REAL TIME.
  */
 
 export interface Campaign {
@@ -57,7 +52,7 @@ export interface Ticket {
 const STORAGE_KEY_PREFIX = 'rifas_gpn_db_';
 const BROADCAST_EVENT = 'rifas_gpn_db_update';
 
-// Initial seed campaign: Show Completo do Grupo Part Negra (300 numbers, R$ 59,90)
+// Seed campaign: Show Completo do Grupo Part Negra (300 numbers, R$ 59,90)
 const DEFAULT_CAMPAIGNS: Campaign[] = [
   {
     id: 'camp_part_negra',
@@ -72,13 +67,12 @@ const DEFAULT_CAMPAIGNS: Campaign[] = [
   }
 ];
 
-// Zeroed orders: all 300 tickets available
-const DEFAULT_ORDERS: Order[] = [];
-
 function getStoredData<T>(collectionName: string, fallback: T[]): T[] {
   try {
-    const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}${collectionName}`);
-    if (raw) return JSON.parse(raw);
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}${collectionName}`);
+      if (raw) return JSON.parse(raw);
+    }
   } catch (e) {
     console.warn('Storage read error:', e);
   }
@@ -87,73 +81,137 @@ function getStoredData<T>(collectionName: string, fallback: T[]): T[] {
 
 function setStoredData<T>(collectionName: string, data: T[]) {
   try {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}${collectionName}`, JSON.stringify(data));
-    window.dispatchEvent(new CustomEvent(BROADCAST_EVENT, { detail: { collectionName } }));
-  } catch (e) {
-    console.warn('Storage write error:', e);
-  }
-}
-
-// Ensure all purchases are reset and all 300 numbers are 100% available
-const RESET_PURCHASES_MARKER = 'rifas_gpn_zeroed_v3';
-if (typeof window !== 'undefined') {
-  try {
-    if (!localStorage.getItem(RESET_PURCHASES_MARKER)) {
-      localStorage.setItem(RESET_PURCHASES_MARKER, 'true');
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}orders`, JSON.stringify([]));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}tickets`, JSON.stringify([]));
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}${collectionName}`, JSON.stringify(data));
+      window.dispatchEvent(new CustomEvent(BROADCAST_EVENT, { detail: { collectionName } }));
     }
   } catch (e) {
-    console.warn('Could not reset storage:', e);
+    console.warn('Storage write error:', e);
   }
 }
 
 // In-memory active stores
 const collections: Record<string, any[]> = {
   campaigns: getStoredData('campaigns', DEFAULT_CAMPAIGNS),
-  orders: getStoredData('orders', DEFAULT_ORDERS),
+  orders: getStoredData('orders', []),
   tickets: getStoredData('tickets', [])
 };
-
-// Ensure single campaign for Grupo Part Negra (300 numbers, R$ 59,90)
-if (
-  !collections.campaigns.some(c => c.id === 'camp_part_negra') ||
-  collections.campaigns.length !== 1 ||
-  collections.campaigns.some(c => c.id === 'camp_part_negra' && (c.price_per_ticket !== 59.90))
-) {
-  collections.campaigns = [...DEFAULT_CAMPAIGNS];
-  setStoredData('campaigns', collections.campaigns);
-}
 
 // Event bus for real-time reactive listeners
 type Listener = () => void;
 const listeners = new Set<Listener>();
 
-if (typeof window !== 'undefined') {
-  window.addEventListener(BROADCAST_EVENT, (e: any) => {
-    const col = e.detail?.collectionName;
-    if (col) {
-      collections[col] = getStoredData(col, []);
-    }
-    listeners.forEach(fn => fn());
-  });
-
-  window.addEventListener('storage', (e) => {
-    if (e.key?.startsWith(STORAGE_KEY_PREFIX)) {
-      const col = e.key.replace(STORAGE_KEY_PREFIX, '');
-      collections[col] = getStoredData(col, []);
-      listeners.forEach(fn => fn());
+function notifyAllListeners() {
+  listeners.forEach(fn => {
+    try {
+      fn();
+    } catch (e) {
+      console.warn('Listener notification error:', e);
     }
   });
 }
 
 function notifySubscribers(colName: string) {
   setStoredData(colName, collections[colName]);
+  notifyAllListeners();
 }
 
-/**
- * Universal Firestore API Implementation
- */
+// =========================================================================
+// CROSS-DEVICE REAL-TIME CLIENT (SSE + Polling Fallback)
+// Connects to server.ts so that every terminal/device updates simultaneously
+// =========================================================================
+let sseConnection: EventSource | null = null;
+
+function applyRemoteState(serverState: any) {
+  if (!serverState) return;
+
+  if (Array.isArray(serverState.campaigns)) {
+    collections.campaigns = serverState.campaigns;
+    setStoredData('campaigns', collections.campaigns);
+  }
+  if (Array.isArray(serverState.orders)) {
+    collections.orders = serverState.orders;
+    setStoredData('orders', collections.orders);
+  }
+  if (Array.isArray(serverState.tickets)) {
+    collections.tickets = serverState.tickets;
+    setStoredData('tickets', collections.tickets);
+  }
+
+  notifyAllListeners();
+}
+
+export async function fetchServerState() {
+  try {
+    const res = await fetch('/api/state');
+    if (res.ok) {
+      const data = await res.json();
+      applyRemoteState(data);
+    }
+  } catch (err) {
+    // offline or booting
+  }
+}
+
+function initRealtimeSync() {
+  if (typeof window === 'undefined') return;
+
+  // 1. Initial State Fetch
+  fetchServerState();
+
+  // 2. Server-Sent Events (SSE) Live Connection
+  try {
+    if (window.EventSource) {
+      sseConnection = new EventSource('/api/events');
+
+      sseConnection.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.state) {
+            applyRemoteState(payload.state);
+          }
+        } catch (e) {}
+      };
+
+      sseConnection.onerror = () => {
+        // SSE error, will auto-reconnect; fallback polling ensures continuity
+      };
+    }
+  } catch (err) {
+    console.warn('SSE connection failed:', err);
+  }
+
+  // 3. Robust Background Fallback Polling (Every 2.5 seconds)
+  setInterval(() => {
+    fetchServerState();
+  }, 2500);
+
+  // 4. Local storage event listener for same-device multi-tab sync
+  window.addEventListener('storage', (e) => {
+    if (e.key?.startsWith(STORAGE_KEY_PREFIX)) {
+      const col = e.key.replace(STORAGE_KEY_PREFIX, '');
+      collections[col] = getStoredData(col, []);
+      notifyAllListeners();
+    }
+  });
+
+  window.addEventListener(BROADCAST_EVENT, (e: any) => {
+    const col = e.detail?.collectionName;
+    if (col) {
+      collections[col] = getStoredData(col, []);
+      notifyAllListeners();
+    }
+  });
+}
+
+// Auto-start sync in browser
+if (typeof window !== 'undefined') {
+  initRealtimeSync();
+}
+
+// =========================================================================
+// Universal Firestore API Implementation
+// =========================================================================
 export const db = {
   _isSimulated: true,
   name: 'rifas-gpn-firestore'
@@ -253,26 +311,22 @@ export function orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): Query
   return { _type: 'orderBy', order: { field, direction } };
 }
 
-export function limit(count: number): QueryConstraint {
-  return { _type: 'limit', limit: count };
-}
-
 export interface QueryObject {
   _type: 'query';
-  collectionRef: CollectionReference;
+  collectionName: string;
   constraints: QueryConstraint[];
 }
 
-export function query(collectionRef: CollectionReference, ...constraints: QueryConstraint[]): QueryObject {
+export function query(colRef: CollectionReference, ...constraints: QueryConstraint[]): QueryObject {
   return {
     _type: 'query',
-    collectionRef,
+    collectionName: colRef.name,
     constraints
   };
 }
 
 function executeQuery(q: QueryObject | CollectionReference): any[] {
-  const colName = q._type === 'collection' ? q.name : q.collectionRef.name;
+  const colName = q._type === 'collection' ? q.name : q.collectionName;
   let items = [...(collections[colName] || [])];
 
   if (q._type === 'query') {
@@ -280,34 +334,26 @@ function executeQuery(q: QueryObject | CollectionReference): any[] {
       if (c._type === 'where' && c.filter) {
         const { field, op, value } = c.filter;
         items = items.filter(item => {
-          const itemVal = item[field];
-          if (op === '==') return itemVal === value;
-          if (op === '!=') return itemVal !== value;
-          if (op === '<') return itemVal < value;
-          if (op === '<=') return itemVal <= value;
-          if (op === '>') return itemVal > value;
-          if (op === '>=') return itemVal >= value;
-          return true;
+          const val = item[field];
+          switch (op) {
+            case '==': return val === value;
+            case '!=': return val !== value;
+            case '>': return val > value;
+            case '>=': return val >= value;
+            case '<': return val < value;
+            case '<=': return val <= value;
+            default: return true;
+          }
         });
-      }
-    }
-
-    for (const c of q.constraints) {
-      if (c._type === 'orderBy' && c.order) {
+      } else if (c._type === 'orderBy' && c.order) {
         const { field, direction } = c.order;
         items.sort((a, b) => {
-          const valA = a[field] ?? '';
-          const valB = b[field] ?? '';
+          const valA = a[field] || '';
+          const valB = b[field] || '';
           if (valA < valB) return direction === 'asc' ? -1 : 1;
           if (valA > valB) return direction === 'asc' ? 1 : -1;
           return 0;
         });
-      }
-    }
-
-    for (const c of q.constraints) {
-      if (c._type === 'limit' && c.limit) {
-        items = items.slice(0, c.limit);
       }
     }
   }
@@ -315,24 +361,30 @@ function executeQuery(q: QueryObject | CollectionReference): any[] {
   return items;
 }
 
-export async function getDocs(q: QueryObject | CollectionReference): Promise<QuerySnapshot> {
-  const items = executeQuery(q);
+export async function getDocs(target: QueryObject | CollectionReference): Promise<QuerySnapshot> {
+  // Sync before returning query
+  await fetchServerState();
+  const items = executeQuery(target);
   const docs = items.map(item => new DocumentSnapshot(item.id, item));
   return new QuerySnapshot(docs);
 }
 
 export async function getDoc(docRef: DocumentReference): Promise<DocumentSnapshot> {
   const items = collections[docRef.collectionName] || [];
-  const found = items.find(i => i.id === docRef.id);
-  return new DocumentSnapshot(docRef.id, found || null);
+  let item = items.find(i => i.id === docRef.id);
+  if (!item) {
+    await fetchServerState();
+    const fresh = collections[docRef.collectionName] || [];
+    item = fresh.find(i => i.id === docRef.id);
+  }
+  return new DocumentSnapshot(docRef.id, item || null);
 }
 
 export async function addDoc(colRef: CollectionReference, data: any): Promise<DocumentReference> {
-  const id = 'doc_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+  const id = 'ord_' + Math.random().toString(36).substring(2, 10);
   const newItem = {
     id,
-    ...data,
-    createdAt: data.createdAt === 'SERVER_TIMESTAMP' ? new Date().toISOString() : data.createdAt || new Date().toISOString()
+    ...data
   };
 
   if (!collections[colRef.name]) {
@@ -340,7 +392,7 @@ export async function addDoc(colRef: CollectionReference, data: any): Promise<Do
   }
   collections[colRef.name].push(newItem);
 
-  // If an order is created, immediately mark its numbers as occupied/reserved in tickets so they are no longer available
+  // Reserve tickets locally
   if (colRef.name === 'orders' && Array.isArray(data.selected_numbers)) {
     if (!collections.tickets) collections.tickets = [];
     const campaignId = data.campaign_id || 'camp_part_negra';
@@ -367,6 +419,17 @@ export async function addDoc(colRef: CollectionReference, data: any): Promise<Do
   }
 
   notifySubscribers(colRef.name);
+
+  // Send to Central Server (Broadcasts to all devices via SSE)
+  if (colRef.name === 'orders') {
+    try {
+      fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newItem)
+      }).catch(e => console.warn('Sync order to server warning:', e));
+    } catch (e) {}
+  }
 
   return {
     _type: 'document',
@@ -444,11 +507,8 @@ export function onSnapshot(
 }
 
 /**
- * Pix Simulator: Mirrors the exact logic in functions/index.js (Mercado Pago Pix Webhook)
- * Performs atomic transaction:
- * 1. Sets order status to 'paid'
- * 2. Marks tickets as 'paid' with buyer_id and order_id
- * 3. Triggers real-time listeners across all subscribed UI pages!
+ * Mark order as paid centrally on the server and local state
+ * Propagates across all devices instantly via SSE
  */
 export async function markOrderAsPaid(
   orderId: string, 
@@ -457,54 +517,63 @@ export async function markOrderAsPaid(
 ): Promise<boolean> {
   const orders = collections.orders || [];
   const orderIndex = orders.findIndex(o => o.id === orderId);
-  if (orderIndex < 0) return false;
-
-  const order = orders[orderIndex];
-  if (order.status === 'paid') return true;
-
   const paidAt = new Date().toISOString();
-  orders[orderIndex] = {
-    ...order,
-    status: 'paid',
-    paidAt,
-    paymentId: paymentId || order.paymentId || ('MP-' + Date.now().toString().slice(-8)),
-    paymentDetails: paymentDetails || {
-      method: 'pix',
-      amount: order.total_amount
-    }
-  };
 
-  // Update tickets collection
-  if (!collections.tickets) collections.tickets = [];
-  const campaignId = order.campaign_id;
-
-  order.selected_numbers.forEach((num: number) => {
-    const ticketId = `${campaignId}_${num}`;
-    const tIndex = collections.tickets.findIndex(t => t.id === ticketId);
-    const ticketData: Ticket = {
-      id: ticketId,
-      campaign_id: campaignId,
-      number: num,
+  if (orderIndex >= 0) {
+    const order = orders[orderIndex];
+    orders[orderIndex] = {
+      ...order,
       status: 'paid',
-      buyer_id: order.buyer_phone,
-      buyer_name: order.buyer_name,
-      order_id: order.id,
-      updatedAt: paidAt
+      paidAt,
+      paymentId: paymentId || order.paymentId || ('MP-' + Date.now().toString().slice(-8)),
+      paymentDetails: paymentDetails || {
+        method: 'pix',
+        amount: order.total_amount
+      }
     };
-    if (tIndex >= 0) {
-      collections.tickets[tIndex] = ticketData;
-    } else {
-      collections.tickets.push(ticketData);
+
+    if (!collections.tickets) collections.tickets = [];
+    const campaignId = order.campaign_id;
+
+    if (Array.isArray(order.selected_numbers)) {
+      order.selected_numbers.forEach((num: number) => {
+        const ticketId = `${campaignId}_${num}`;
+        const tIndex = collections.tickets.findIndex(t => t.id === ticketId);
+        const ticketData: Ticket = {
+          id: ticketId,
+          campaign_id: campaignId,
+          number: num,
+          status: 'paid',
+          buyer_id: order.buyer_phone,
+          buyer_name: order.buyer_name,
+          order_id: order.id,
+          updatedAt: paidAt
+        };
+        if (tIndex >= 0) {
+          collections.tickets[tIndex] = ticketData;
+        } else {
+          collections.tickets.push(ticketData);
+        }
+      });
     }
-  });
 
-  // Salva no LocalStorage persistente para sobreviver a recargas de página
-  setStoredData('orders', orders);
-  setStoredData('tickets', collections.tickets);
+    setStoredData('orders', orders);
+    setStoredData('tickets', collections.tickets);
+    notifySubscribers('orders');
+    notifySubscribers('tickets');
+  }
 
-  // Notifica todos os ouvintes reativos em tempo real
-  notifySubscribers('orders');
-  notifySubscribers('tickets');
+  // Centrally update server store (propagates via SSE to all other users)
+  try {
+    await fetch('/api/mark-paid', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId, paymentId, paymentDetails })
+    });
+  } catch (err) {
+    console.warn('Central mark-paid sync warning:', err);
+  }
+
   return true;
 }
 
@@ -519,6 +588,10 @@ export function resetAllPurchases() {
   setStoredData('tickets', []);
   notifySubscribers('orders');
   notifySubscribers('tickets');
+
+  try {
+    fetch('/api/reset-purchases', { method: 'POST' }).catch(() => {});
+  } catch (e) {}
 }
 
 export function resetRifasDemoData() {
@@ -531,5 +604,8 @@ export function resetRifasDemoData() {
   notifySubscribers('campaigns');
   notifySubscribers('orders');
   notifySubscribers('tickets');
-}
 
+  try {
+    fetch('/api/reset-purchases', { method: 'POST' }).catch(() => {});
+  } catch (e) {}
+}

@@ -255,6 +255,9 @@ Guarde esta mensagem com os seus números para conferência oficial no dia do so
 3️⃣ *Aviso do Sorteio Ao Vivo:*
 Você será avisado diretamente aqui no seu WhatsApp sobre o dia e o horário exato do sorteio ao vivo!
 
+📄 *Comprovante em PDF:*
+Você também pode salvar o comprovante oficial em formato PDF emitido no sistema para anexar ou arquivar.
+
 🍀 *Boa sorte! O Grupo Part Negra agradece sua participação!*`;
 }
 

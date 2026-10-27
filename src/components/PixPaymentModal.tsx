@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Copy, Check, Clock, X, CheckCircle2, ShieldCheck, Loader2, MessageCircle, AlertCircle, ExternalLink, Zap, Radio } from 'lucide-react';
+import { Copy, Check, Clock, X, CheckCircle2, ShieldCheck, Loader2, MessageCircle, AlertCircle, ExternalLink, Zap, Radio, FileDown } from 'lucide-react';
 import { formatCurrency, formatTicketNumber, formatPhone, formatCpf, generateWhatsAppTicketMessage, generateWhatsAppLink } from '../utils/raffle';
+import { downloadReceiptPdf } from '../utils/pdfReceipt';
 import { useToast } from './Toast';
 import confetti from 'canvas-confetti';
 
@@ -258,6 +259,28 @@ export default function PixPaymentModal({
                     <MessageCircle className="w-4 h-4 fill-current" />
                     <span>Salvar Números no WhatsApp</span>
                   </a>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      downloadReceiptPdf({
+                        id: String(pixData.payment_id || 'pedido'),
+                        buyer_name: pixData.comprador_nome || 'Participante',
+                        buyer_phone: pixData.comprador_telefone || '',
+                        buyer_cpf: pixData.comprador_cpf,
+                        buyer_email: pixData.comprador_email,
+                        selected_numbers: (pixData.numeros_selecionados || []).map(n => Number(n)),
+                        total_amount: pixData.valor,
+                        paymentId: String(pixData.payment_id || '')
+                      });
+                      toast.success('Comprovante em PDF baixado com sucesso! Agora você pode anexar no WhatsApp.', 'PDF Oficial');
+                    }}
+                    className="w-full mt-2 py-2.5 px-3 bg-neutral-950 hover:bg-neutral-800 border border-emerald-500/30 text-emerald-300 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <FileDown className="w-4 h-4 text-emerald-400" />
+                    <span>Baixar Comprovante em PDF (Para o WhatsApp)</span>
+                  </button>
+
                   <p className="text-[10px] text-neutral-500 mt-1.5">
                     WhatsApp aberto automaticamente para armazenar seus bilhetes.
                   </p>

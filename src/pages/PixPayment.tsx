@@ -2,9 +2,10 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db, markOrderAsPaid, simulatePixPaymentConfirmation } from '../services/firebaseConfig';
-import { CheckCircle2, Copy, Check, Clock, Loader2, ArrowLeft, Zap, ShieldCheck, Sparkles, MessageCircle, ExternalLink, RefreshCw, Ticket, CheckCheck } from 'lucide-react';
+import { CheckCircle2, Copy, Check, Clock, Loader2, ArrowLeft, Zap, ShieldCheck, Sparkles, MessageCircle, ExternalLink, RefreshCw, Ticket, CheckCheck, FileDown } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { formatCurrency, formatTicketNumber, formatCpf, generateWhatsAppTicketMessage, generateWhatsAppLink } from '../utils/raffle';
+import { downloadReceiptPdf } from '../utils/pdfReceipt';
 import confetti from 'canvas-confetti';
 import { useToast } from '../components/Toast';
 
@@ -255,6 +256,18 @@ export default function PixPayment() {
               <MessageCircle className="w-4 h-4 fill-current" />
               <span>Salvar Meus Bilhetes no WhatsApp</span>
             </a>
+
+            <button
+              type="button"
+              onClick={() => {
+                downloadReceiptPdf(order);
+                toast.success('Comprovante em PDF baixado com sucesso! Agora você pode anexar no WhatsApp.', 'PDF Oficial');
+              }}
+              className="w-full py-3 px-3 bg-neutral-950 hover:bg-neutral-800 border border-emerald-500/30 hover:border-emerald-500/60 text-emerald-300 font-bold rounded-2xl text-xs flex items-center justify-center gap-2 transition cursor-pointer"
+            >
+              <FileDown className="w-4 h-4 text-emerald-400" />
+              <span>Baixar Comprovante em PDF (Para Enviar no WhatsApp)</span>
+            </button>
 
             <div className="grid grid-cols-2 gap-2">
               <Link

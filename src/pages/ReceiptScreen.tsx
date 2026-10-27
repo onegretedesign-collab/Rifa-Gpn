@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../services/firebaseConfig';
-import { CheckCircle2, Ticket, Printer, Share2, ArrowLeft, Loader2, Calendar, Phone, User, DollarSign, ShieldCheck, MessageCircle, Copy, Check, Radio, CreditCard, Mail } from 'lucide-react';
+import { CheckCircle2, Ticket, Printer, Share2, ArrowLeft, Loader2, Calendar, Phone, User, DollarSign, ShieldCheck, MessageCircle, Copy, Check, Radio, CreditCard, Mail, FileDown } from 'lucide-react';
 import { formatCurrency, formatTicketNumber, generateWhatsAppTicketMessage, generateWhatsAppLink, formatCpf } from '../utils/raffle';
+import { downloadReceiptPdf } from '../utils/pdfReceipt';
 import confetti from 'canvas-confetti';
 import { useToast } from '../components/Toast';
 
@@ -157,12 +158,24 @@ export default function ReceiptScreen() {
         <div className="flex gap-2">
           <button
             type="button"
+            onClick={() => {
+              downloadReceiptPdf(order);
+              toast.success('Comprovante em PDF baixado!', 'PDF');
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 bg-neutral-900 hover:bg-neutral-800 border border-emerald-500/30 rounded-xl text-xs font-semibold text-emerald-400 transition cursor-pointer"
+            title="Baixar comprovante oficial em PDF"
+          >
+            <FileDown className="w-3.5 h-3.5 text-emerald-400" />
+            <span>PDF</span>
+          </button>
+          <button
+            type="button"
             onClick={() => window.print()}
             className="flex items-center gap-1.5 px-3 py-2 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 rounded-xl text-xs font-semibold text-neutral-300 transition cursor-pointer"
             title="Imprimir ou Salvar em PDF"
           >
             <Printer className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Imprimir / PDF</span>
+            <span className="hidden sm:inline">Imprimir</span>
           </button>
           <button
             type="button"
@@ -170,7 +183,7 @@ export default function ReceiptScreen() {
             className="flex items-center gap-1.5 px-3 py-2 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 rounded-xl text-xs font-semibold text-neutral-300 transition cursor-pointer"
           >
             <Share2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{copiedShare ? 'Link Copiado!' : 'Compartilhar'}</span>
+            <span>{copiedShare ? 'Copiado!' : 'Compartilhar'}</span>
           </button>
         </div>
       </div>
@@ -210,23 +223,37 @@ export default function ReceiptScreen() {
                 Envie seus números para o seu WhatsApp ({order.buyer_phone}) para guardar e receber o aviso do sorteio ao vivo!
               </p>
 
-              <div className="mt-3 flex flex-col sm:flex-row gap-2">
+              <div className="mt-3 flex flex-col gap-2">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSendWhatsApp}
+                    className="flex-1 py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition active:scale-[0.98] cursor-pointer"
+                  >
+                    <MessageCircle className="w-4 h-4 fill-current" />
+                    <span>{whatsappSent ? 'Reenviar no WhatsApp' : 'Salvar Números no WhatsApp'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCopyMessage}
+                    className="py-2.5 px-3 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 rounded-xl text-[11px] font-semibold text-neutral-300 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                    title="Copiar texto da mensagem"
+                  >
+                    {copiedMessage ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-neutral-400" />}
+                    <span>{copiedMessage ? 'Copiado!' : 'Copiar Texto'}</span>
+                  </button>
+                </div>
+
                 <button
                   type="button"
-                  onClick={handleSendWhatsApp}
-                  className="flex-1 py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition active:scale-[0.98] cursor-pointer"
+                  onClick={() => {
+                    downloadReceiptPdf(order);
+                    toast.success('Comprovante em PDF baixado com sucesso! Agora você pode anexar no WhatsApp.', 'PDF Oficial');
+                  }}
+                  className="w-full py-2.5 px-3 bg-neutral-900 hover:bg-neutral-800 border border-emerald-500/30 hover:border-emerald-500/60 text-emerald-300 hover:text-emerald-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition shadow-md cursor-pointer active:scale-[0.99]"
                 >
-                  <MessageCircle className="w-4 h-4 fill-current" />
-                  <span>{whatsappSent ? 'Reenviar no WhatsApp' : 'Salvar Números no WhatsApp'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyMessage}
-                  className="py-2.5 px-3 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 rounded-xl text-[11px] font-semibold text-neutral-300 flex items-center justify-center gap-1.5 transition cursor-pointer"
-                  title="Copiar texto da mensagem"
-                >
-                  {copiedMessage ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-neutral-400" />}
-                  <span>{copiedMessage ? 'Copiado!' : 'Copiar Texto'}</span>
+                  <FileDown className="w-4 h-4 text-emerald-400" />
+                  <span>Baixar Comprovante em PDF (Para Enviar no WhatsApp)</span>
                 </button>
               </div>
             </div>
