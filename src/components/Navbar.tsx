@@ -15,7 +15,7 @@ export default function Navbar() {
           </div>
           <div className="flex flex-col">
             <span className="font-extrabold text-lg tracking-tight text-white leading-tight">
-              Rifas <span className="text-emerald-400">GPN</span>
+              Rifashow<span className="text-emerald-400">gpn</span>
             </span>
             <span className="text-[10px] text-neutral-400 font-medium tracking-wide">
               Sorteios 100% Seguros

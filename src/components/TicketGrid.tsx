@@ -84,9 +84,6 @@ export default function TicketGrid({
               Tempo Real
             </span>
           </div>
-          <p className="text-xs text-neutral-400 mt-0.5">
-            Os números vendidos são marcados automaticamente em todos os aparelhos
-          </p>
         </div>
 
         {/* Search within grid */}
